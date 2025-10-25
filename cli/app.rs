@@ -1784,7 +1784,6 @@ impl Limbo {
         })
     }
 
-
     fn write_page_hexdump(&mut self, page: &DbPage, page_size: i64) -> anyhow::Result<()> {
         let mut seen_page_label = false;
 
@@ -1794,7 +1793,12 @@ impl Limbo {
             }
 
             if !seen_page_label {
-                writeln!(self, "| page {} offset {}", page.pgno, (page.pgno - 1) * page_size)?;
+                writeln!(
+                    self,
+                    "| page {} offset {}",
+                    page.pgno,
+                    (page.pgno - 1) * page_size
+                )?;
                 seen_page_label = true;
             }
 
@@ -1803,7 +1807,7 @@ impl Limbo {
 
             // Hex bytes
             for byte in chunk {
-                write!(self, " {:02x}", byte)?;
+                write!(self, " {byte:02x}")?;
             }
             for _ in 0..(16 - chunk.len()) {
                 write!(self, "   ")?; // Pad partial lines
@@ -1817,7 +1821,7 @@ impl Limbo {
                     b' '..=b'~' if ![b'{', b'}', b'"', b'\\'].contains(&byte) => byte as char,
                     _ => '.',
                 };
-                write!(self, "{}", ch)?;
+                write!(self, "{ch}")?;
             }
             writeln!(self)?;
         }
@@ -1825,9 +1829,12 @@ impl Limbo {
     }
 
     fn dump_database_as_text(&mut self) -> anyhow::Result<()> {
-
         let metadata = self.fetch_db_metadata()?;
-        tracing::debug!(page_size = metadata.page_size, page_count = metadata.page_count, "Fetched metadata");
+        tracing::debug!(
+            page_size = metadata.page_size,
+            page_count = metadata.page_count,
+            "Fetched metadata"
+        );
 
         writeln!(
             self,
@@ -1839,7 +1846,6 @@ impl Limbo {
 
         let dump_sql = "SELECT pgno, data FROM sqlite_dbpage ORDER BY pgno";
         if let Some(mut rows) = self.conn.query(dump_sql)? {
-
             step_rows::<_, ()>(&mut rows, |rows| {
                 let row = rows.row().unwrap();
                 let pgno: i64 = row.get(0)?;
@@ -1848,7 +1854,7 @@ impl Limbo {
                     Value::Blob(bytes) => bytes,
                     _ => &[],
                 };
-                
+
                 let page = DbPage { pgno, data };
                 self.write_page_hexdump(&page, metadata.page_size)?;
 
