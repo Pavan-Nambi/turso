@@ -355,13 +355,50 @@ fn find_git_dir(start_path: impl AsRef<Path>) -> Option<PathBuf> {
 }
 
 fn resolve_head(git_dir: impl AsRef<Path>) -> anyhow::Result<String> {
-    // HACK ignores stuff like packed-refs
-    let head_path = git_dir.as_ref().join("HEAD");
+    let git_dir = git_dir.as_ref();
+    let head_path = git_dir.join("HEAD");
     let head_contents = read_to_string(&head_path)?;
+
     if let Some(ref_path) = head_contents.strip_prefix("ref: ") {
-        let ref_file = git_dir.as_ref().join(ref_path);
-        read_to_string(&ref_file)
+        let ref_path = ref_path.trim();
+        let ref_file = git_dir.join(ref_path);
+
+        // Try reading from loose ref file (avoids TOCTOU by attempting read directly)
+        match read_to_string(&ref_file) {
+            Ok(contents) => return Ok(contents),
+            Err(e) if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound) => {
+                // Fall through to packed-refs
+            }
+            Err(e) => return Err(e),
+        }
+
+        // For worktrees, packed-refs is in the main repo (commondir), not the worktree git dir.
+        // Check for commondir file which points to the main repo's git directory.
+        let common_dir = match read_to_string(git_dir.join("commondir")) {
+            Ok(rel_path) => git_dir.join(rel_path),
+            Err(_) => git_dir.to_path_buf(),
+        };
+
+        // Fall back to packed-refs
+        if let Ok(packed_contents) = read_to_string(common_dir.join("packed-refs")) {
+            for line in packed_contents.lines() {
+                // Skip comments and peeled refs (^...)
+                if line.starts_with('#') || line.starts_with('^') {
+                    continue;
+                }
+                // Format: "<sha> <ref>"
+                if let Some((sha, packed_ref)) = line.split_once(' ') {
+                    if packed_ref == ref_path {
+                        return Ok(sha.to_string());
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Could not resolve ref: {}", ref_path);
     } else {
+        // Detached HEAD - contents is the commit hash directly
         Ok(head_contents)
     }
 }
