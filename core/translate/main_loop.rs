@@ -23,6 +23,7 @@ use super::{
     },
 };
 use crate::{
+    function::AggFunc,
     schema::{Index, IndexColumn, Table},
     translate::{
         collate::{get_collseq_from_expr, CollationSeq},
@@ -1587,18 +1588,46 @@ fn emit_loop_source(
                 .reg_agg_start
                 .expect("aggregate registers must be initialized");
 
+            // Check if we have non-aggregated columns
+            let has_non_agg_columns = plan
+                .result_columns
+                .iter()
+                .any(|rc| !rc.contains_aggregates);
+
+            // Check if we have a MIN or MAX aggregate - if so, we need special handling
+            // for non-aggregated columns to ensure they come from the MIN/MAX row.
+            let min_max_skip_flag_reg = if has_non_agg_columns {
+                plan.aggregates.iter().find_map(|agg| {
+                    if matches!(agg.func, AggFunc::Min | AggFunc::Max) {
+                        Some(program.alloc_register())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
             // In planner.rs, we have collected all aggregates from the SELECT clause, including ones where the aggregate is embedded inside
             // a more complex expression. Some examples: length(sum(x)), sum(x) + avg(y), sum(x) + 1, etc.
             // The result of those more complex expressions depends on the final result of the aggregate, so we don't translate the complete expressions here.
             // Instead, we accumulate the intermediate results of all aggreagates, and evaluate any expressions that do not contain aggregates.
             for (i, agg) in plan.aggregates.iter().enumerate() {
                 let reg = start_reg + i;
+                // For MIN/MAX with non-aggregated columns, pass the skip_flag_reg
+                // so the aggregate can signal when to update non-aggregated columns.
+                let skip_flag = if matches!(agg.func, AggFunc::Min | AggFunc::Max) {
+                    min_max_skip_flag_reg
+                } else {
+                    None
+                };
                 translate_aggregation_step(
                     program,
                     &plan.table_references,
                     AggArgumentSource::new_from_expression(&agg.func, &agg.args, &agg.distinctness),
                     reg,
                     &t_ctx.resolver,
+                    skip_flag,
                 )?;
                 if let Distinctness::Distinct { ctx } = &agg.distinctness {
                     let ctx = ctx
@@ -1608,7 +1637,20 @@ fn emit_loop_source(
                 }
             }
 
-            let label_emit_nonagg_only_once = if let Some(flag) = t_ctx.reg_nonagg_emit_once_flag {
+            // Determine which flag to use for controlling non-aggregate column emission:
+            // - For MIN/MAX: use the skip_flag_reg set by AggStep (updates when min/max changes)
+            // - For other aggregates: use the simple "emit once" flag (updates only first row)
+            let (skip_flag_reg, set_flag_after_emit) = if let Some(flag) = min_max_skip_flag_reg {
+                // MIN/MAX: AggStep sets the flag, so we don't need to set it manually after emit
+                (Some(flag), false)
+            } else if let Some(flag) = t_ctx.reg_nonagg_emit_once_flag {
+                // Other aggregates: use the simple "first row" flag
+                (Some(flag), true)
+            } else {
+                (None, false)
+            };
+
+            let label_skip_nonagg = if let Some(flag) = skip_flag_reg {
                 let if_label = program.allocate_label();
                 program.emit_insn(Insn::If {
                     reg: flag,
@@ -1640,10 +1682,14 @@ fn emit_loop_source(
                     &t_ctx.resolver,
                 )?;
             }
-            if let Some(label) = label_emit_nonagg_only_once {
+            if let Some(label) = label_skip_nonagg {
                 program.resolve_label(label, program.offset());
-                let flag = t_ctx.reg_nonagg_emit_once_flag.unwrap();
-                program.emit_int(1, flag);
+                // Only set the flag manually for non-MIN/MAX aggregates.
+                // For MIN/MAX, the AggStep instruction handles setting the flag.
+                if set_flag_after_emit {
+                    let flag = t_ctx.reg_nonagg_emit_once_flag.unwrap();
+                    program.emit_int(1, flag);
+                }
             }
 
             Ok(())

@@ -82,7 +82,7 @@ impl From<Value> for turso_core::Value {
                     turso_core::Value::Float(v)
                 }
             }
-            Value::Text(v) => turso_core::Value::from_text(&v),
+            Value::Text(v) => turso_core::Value::from_text(v),
             Value::Blob(v) => turso_core::Value::from_blob(v.to_owned()),
         }
     }
@@ -271,7 +271,7 @@ fn do_fuzz(expr: Expr) -> Result<Corpus, Box<dyn Error>> {
 
     let found = 'value: {
         let io = Arc::new(turso_core::MemoryIO::new());
-        let db = turso_core::Database::open_file(io.clone(), ":memory:", false)?;
+        let db = turso_core::Database::open_file(io.clone(), ":memory:")?;
         let conn = db.connect()?;
 
         let mut stmt = conn.prepare(sql)?;
@@ -281,7 +281,9 @@ fn do_fuzz(expr: Expr) -> Result<Corpus, Box<dyn Error>> {
         loop {
             use turso_core::StepResult;
             match stmt.step()? {
-                StepResult::IO => stmt.run_once()?,
+                StepResult::IO => {
+                    stmt._io().step()?;
+                }
                 StepResult::Row => {
                     let row = stmt.row().unwrap();
                     assert_eq!(row.len(), 1, "expr: {:?}", expr);

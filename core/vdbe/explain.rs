@@ -976,14 +976,19 @@ pub fn insn_to_row(
                 acc_reg,
                 delimiter: _,
                 col,
+                skip_flag_reg,
             } => (
                 "AggStep",
                 0,
                 *col as i64,
                 *acc_reg as i64,
                 Value::build_text(func.as_str()),
-                0,
-                format!("accum=r[{}] step(r[{}])", *acc_reg, *col),
+                skip_flag_reg.map_or(0, |r| r as i64),
+                if let Some(flag_reg) = skip_flag_reg {
+                    format!("accum=r[{}] step(r[{}]) skip_flag=r[{}]", *acc_reg, *col, flag_reg)
+                } else {
+                    format!("accum=r[{}] step(r[{}])", *acc_reg, *col)
+                },
             ),
             Insn::AggFinal { register, func } => (
                 "AggFinal",

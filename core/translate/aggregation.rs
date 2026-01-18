@@ -328,13 +328,18 @@ impl<'a> AggArgumentSource<'a> {
 /// Examples:
 /// * In `SELECT SUM(price) FROM t`, `price` is evaluated for each row and added to the accumulator.
 /// * In `SELECT product_category, SUM(price) FROM t GROUP BY product_category`, `price` is evaluated for
-///   each row in the group and added to that group’s accumulator.
+///   each row in the group and added to that group's accumulator.
+///
+/// For MIN/MAX with non-aggregated columns, pass a `skip_flag_reg` to track whether the min/max
+/// value changed. The AggStep will set this register to 1 if the value didn't change (skip updating
+/// non-aggregated columns) or 0 if it did change (update non-aggregated columns).
 pub fn translate_aggregation_step(
     program: &mut ProgramBuilder,
     referenced_tables: &TableReferences,
     agg_arg_source: AggArgumentSource,
     target_register: usize,
     resolver: &Resolver,
+    skip_flag_reg: Option<usize>,
 ) -> Result<usize> {
     let num_args = agg_arg_source.num_args();
     let func = agg_arg_source.agg_func();
@@ -350,6 +355,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Avg,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -362,6 +368,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Count0,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -376,6 +383,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Count,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -400,6 +408,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: delimiter_reg,
                 func: AggFunc::GroupConcat,
+                skip_flag_reg: None,
             });
 
             target_register
@@ -417,6 +426,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Max,
+                skip_flag_reg,
             });
             target_register
         }
@@ -433,6 +443,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Min,
+                skip_flag_reg,
             });
             target_register
         }
@@ -450,6 +461,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: value_reg,
                 func: AggFunc::JsonGroupObject,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -465,6 +477,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::JsonGroupArray,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -482,6 +495,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: delimiter_reg,
                 func: AggFunc::StringAgg,
+                skip_flag_reg: None,
             });
 
             target_register
@@ -497,6 +511,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Sum,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -511,6 +526,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::Total,
+                skip_flag_reg: None,
             });
             target_register
         }
@@ -540,6 +556,7 @@ pub fn translate_aggregation_step(
                 col: expr_reg,
                 delimiter: 0,
                 func: AggFunc::External(func.clone()),
+                skip_flag_reg: None,
             });
             target_register
         }

@@ -790,11 +790,21 @@ pub enum Insn {
         target_pc: BranchOffset,
     },
 
+    /// Perform one step of an aggregate function.
+    ///
+    /// For MIN/MAX with non-aggregated columns, `skip_flag_reg` is used to track
+    /// whether the aggregate value changed. When the min/max value is NOT updated,
+    /// 1 is written to skip_flag_reg (signaling to skip updating non-aggregated columns).
+    /// When the min/max value IS updated (or it's the first value), skip_flag_reg is
+    /// set to 0 (allowing non-aggregated columns to be updated).
     AggStep {
         acc_reg: usize,
         col: usize,
         delimiter: usize,
         func: AggFunc,
+        /// Optional register to write skip flag for MIN/MAX aggregates.
+        /// When Some, MIN/MAX will write 1 if value didn't change (skip), 0 if it changed.
+        skip_flag_reg: Option<usize>,
     },
 
     AggFinal {

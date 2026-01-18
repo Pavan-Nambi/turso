@@ -3574,6 +3574,7 @@ pub fn op_agg_step(
             col,
             delimiter,
             func,
+            skip_flag_reg,
         },
         insn
     );
@@ -3756,14 +3757,24 @@ pub fn op_agg_step(
             };
 
             let new_value = col.get_value();
-            if *new_value != Value::Null
+            let should_update = *new_value != Value::Null
                 && acc.as_ref().is_none_or(|acc| {
                     use std::cmp::Ordering;
                     compare_with_collation(new_value, acc, state.current_collation)
                         == Ordering::Greater
-                })
-            {
+                });
+
+            if should_update {
                 *acc = Some(new_value.clone());
+            }
+
+            // Set skip flag: 1 if we didn't update (skip non-agg columns), 0 if we did update
+            if let Some(flag_reg) = skip_flag_reg {
+                state.registers[*flag_reg] = Register::Value(Value::Integer(if should_update {
+                    0
+                } else {
+                    1
+                }));
             }
         }
         AggFunc::Min => {
@@ -3779,15 +3790,24 @@ pub fn op_agg_step(
             };
 
             let new_value = col.get_value();
-
-            if *new_value != Value::Null
+            let should_update = *new_value != Value::Null
                 && acc.as_ref().is_none_or(|acc| {
                     use std::cmp::Ordering;
                     compare_with_collation(new_value, acc, state.current_collation)
                         == Ordering::Less
-                })
-            {
+                });
+
+            if should_update {
                 *acc = Some(new_value.clone());
+            }
+
+            // Set skip flag: 1 if we didn't update (skip non-agg columns), 0 if we did update
+            if let Some(flag_reg) = skip_flag_reg {
+                state.registers[*flag_reg] = Register::Value(Value::Integer(if should_update {
+                    0
+                } else {
+                    1
+                }));
             }
         }
         AggFunc::GroupConcat | AggFunc::StringAgg => {
