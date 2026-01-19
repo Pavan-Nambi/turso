@@ -1050,6 +1050,7 @@ impl SimConnection {
             SimConnection::Disconnected => false,
         }
     }
+
     pub(crate) fn disconnect(&mut self) {
         let conn = mem::replace(self, SimConnection::Disconnected);
 
