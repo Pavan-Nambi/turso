@@ -25,6 +25,7 @@ use crate::generate::{GeneratorKind, PropTestBackend, SqlGenBackend, SqlGenerato
 use crate::memory::{MemorySimIO, SimIO};
 use crate::oracle::{DifferentialOracle, OracleResult, QueryResult, check_differential};
 use crate::schema::SchemaIntrospector;
+use crate::seed_corpus::load_seed_corpus;
 pub use sql_gen::TreeMode;
 use sql_gen_prop::SqlValue;
 
@@ -51,6 +52,8 @@ pub struct SimConfig {
     pub tree_mode: TreeMode,
     /// Whether to enable MVCC mode.
     pub mvcc: bool,
+    /// Optional path to a seed corpus (SQL or Quint ITF).
+    pub seed_corpus: Option<PathBuf>,
 }
 
 impl Default for SimConfig {
@@ -66,6 +69,7 @@ impl Default for SimConfig {
             coverage: false,
             tree_mode: TreeMode::default(),
             mvcc: false,
+            seed_corpus: None,
         }
     }
 }
@@ -339,93 +343,122 @@ impl Fuzzer {
         };
 
         let mut schema = self.introspect_and_verify_schemas()?;
+        let mut statement_idx = 0usize;
+
+        if let Some(seed_corpus) = &self.config.seed_corpus {
+            let seed_statements = load_seed_corpus(seed_corpus).with_context(|| {
+                format!("failed to load seed corpus from {}", seed_corpus.display())
+            })?;
+            tracing::info!(
+                "Loaded {} seed-corpus statements from {}",
+                seed_statements.len(),
+                seed_corpus.display()
+            );
+            for stmt in seed_statements {
+                self.execute_statement(statement_idx, &stmt, stats, executed_sql, &mut schema)?;
+                statement_idx += 1;
+            }
+        }
 
         for i in 0..self.config.num_statements {
             let stmt = generator.generate(&schema)?;
 
-            if self.config.verbose {
-                let stmt_type = if stmt.is_ddl { "DDL" } else { "DML" };
-                tracing::info!("Statement {} [{}]: {}", i, stmt_type, stmt.sql);
-            }
-
-            // Execute on both databases and check oracle.
-            // catch_unwind so that a panic inside Turso still reports
-            // stats and the offending SQL instead of just a stack trace.
-            let ctx = Arc::clone(&self.panic_context);
-            let prev_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                let bt = std::backtrace::Backtrace::force_capture();
-                *ctx.lock() = Some(format!("{info}\n{bt}"));
-            }));
-
-            let oracle_result = std::panic::catch_unwind(|| {
-                check_differential(&self.turso_conn, &self.sqlite_conn, &stmt)
-            });
-
-            std::panic::set_hook(prev_hook);
-
-            let oracle_result = match oracle_result {
-                Ok(result) => result,
-                Err(panic) => {
-                    let msg = panic
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "Unknown panic".to_string());
-                    let context = self.panic_context.lock().take().unwrap_or_default();
-                    executed_sql.push(format!("-- PANIC: {}", stmt.sql));
-                    stats.oracle_failures += 1;
-                    tracing::error!("Panic at statement {i}: {msg}");
-                    tracing::error!("Panicking SQL: {}", stmt.sql);
-                    tracing::error!("Backtrace:\n{context}");
-                    return Err(anyhow::anyhow!(
-                        "Panic during statement {i}: {msg}\n  SQL: {}\n{context}",
-                        stmt.sql
-                    ));
-                }
-            };
-
-            match oracle_result {
-                OracleResult::Pass => {
-                    stats.statements_executed += 1;
-                    executed_sql.push(stmt.sql.clone());
-                }
-                OracleResult::Warning(reason) => {
-                    stats.statements_executed += 1;
-                    stats.warnings += 1;
-                    push_warning_comments(executed_sql, i, &reason);
-                    executed_sql.push(stmt.sql.clone());
-                    tracing::warn!("Oracle warning at statement {i}: {reason}");
-                }
-                OracleResult::Fail(reason) => {
-                    stats.oracle_failures += 1;
-                    executed_sql.push(format!("-- FAILED: {}", stmt.sql));
-                    tracing::error!("Oracle failure at statement {i}: {reason}");
-                    if !self.config.verbose {
-                        tracing::error!("Failing SQL: {}", stmt.sql);
-                    }
-                    return Err(anyhow::anyhow!("Oracle failure: {reason}"));
-                }
-            }
-
-            if stmt.is_ddl {
-                schema = self.introspect_and_verify_schemas().map_err(|e| {
-                    anyhow::anyhow!(
-                        "Schema mismatch after DDL statement {i} ({}): {e}",
-                        stmt.sql
-                    )
-                })?;
-                tracing::debug!(
-                    "Schema updated after DDL: {} tables, {} indexes",
-                    schema.tables.len(),
-                    schema.indexes.len()
-                );
-            }
+            self.execute_statement(statement_idx + i, &stmt, stats, executed_sql, &mut schema)?;
         }
 
         self.run_integrity_check(stats, executed_sql)?;
 
         *coverage_out = generator.take_coverage();
+
+        Ok(())
+    }
+
+    fn execute_statement(
+        &self,
+        statement_idx: usize,
+        stmt: &crate::generate::GeneratedStatement,
+        stats: &mut SimStats,
+        executed_sql: &mut Vec<String>,
+        schema: &mut sql_gen::Schema,
+    ) -> Result<()> {
+        if self.config.verbose {
+            let stmt_type = if stmt.is_ddl { "DDL" } else { "DML" };
+            tracing::info!("Statement {} [{}]: {}", statement_idx, stmt_type, stmt.sql);
+        }
+
+        // Execute on both databases and check oracle.
+        // catch_unwind so that a panic inside Turso still reports
+        // stats and the offending SQL instead of just a stack trace.
+        let ctx = Arc::clone(&self.panic_context);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let bt = std::backtrace::Backtrace::force_capture();
+            *ctx.lock() = Some(format!("{info}\n{bt}"));
+        }));
+
+        let oracle_result = std::panic::catch_unwind(|| {
+            check_differential(&self.turso_conn, &self.sqlite_conn, stmt)
+        });
+
+        std::panic::set_hook(prev_hook);
+
+        let oracle_result = match oracle_result {
+            Ok(result) => result,
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "Unknown panic".to_string());
+                let context = self.panic_context.lock().take().unwrap_or_default();
+                executed_sql.push(format!("-- PANIC: {}", stmt.sql));
+                stats.oracle_failures += 1;
+                tracing::error!("Panic at statement {statement_idx}: {msg}");
+                tracing::error!("Panicking SQL: {}", stmt.sql);
+                tracing::error!("Backtrace:\n{context}");
+                return Err(anyhow::anyhow!(
+                    "Panic during statement {statement_idx}: {msg}\n  SQL: {}\n{context}",
+                    stmt.sql
+                ));
+            }
+        };
+
+        match oracle_result {
+            OracleResult::Pass => {
+                stats.statements_executed += 1;
+                executed_sql.push(stmt.sql.clone());
+            }
+            OracleResult::Warning(reason) => {
+                stats.statements_executed += 1;
+                stats.warnings += 1;
+                push_warning_comments(executed_sql, statement_idx, &reason);
+                executed_sql.push(stmt.sql.clone());
+                tracing::warn!("Oracle warning at statement {statement_idx}: {reason}");
+            }
+            OracleResult::Fail(reason) => {
+                stats.oracle_failures += 1;
+                executed_sql.push(format!("-- FAILED: {}", stmt.sql));
+                tracing::error!("Oracle failure at statement {statement_idx}: {reason}");
+                if !self.config.verbose {
+                    tracing::error!("Failing SQL: {}", stmt.sql);
+                }
+                return Err(anyhow::anyhow!("Oracle failure: {reason}"));
+            }
+        }
+
+        if stmt.is_ddl {
+            *schema = self.introspect_and_verify_schemas().map_err(|e| {
+                anyhow::anyhow!(
+                    "Schema mismatch after DDL statement {statement_idx} ({}): {e}",
+                    stmt.sql
+                )
+            })?;
+            tracing::debug!(
+                "Schema updated after DDL: {} tables, {} indexes",
+                schema.tables.len(),
+                schema.indexes.len()
+            );
+        }
 
         Ok(())
     }
@@ -586,6 +619,7 @@ mod tests {
             coverage: false,
             tree_mode: TreeMode::default(),
             mvcc: false,
+            seed_corpus: None,
         };
         let sim = Fuzzer::new(config);
         assert!(sim.is_ok());

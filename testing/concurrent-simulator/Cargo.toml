@@ -28,12 +28,16 @@ clap = { workspace = true, features = ["derive"] }
 memmap2 = "0.9"
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+serde_json = { workspace = true }
 sql_generation = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 turso_core = { workspace = true, features = ["simulator"]}
 turso_parser = { workspace = true }
 hex = "0.4.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 checksum = ["turso_core/checksum"]

@@ -2,6 +2,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use rand::{Rng, RngCore};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -9,6 +10,7 @@ use turso_whopper::{
     StepResult, Whopper, WhopperOpts,
     chaotic_elle::{ChaoticElleProfile, ChaoticWorkloadProfile, ElleModelKind},
     properties::*,
+    script_itf::load_scripted_steps_from_itf,
     workloads::*,
 };
 
@@ -54,6 +56,20 @@ struct Args {
     /// Dump database files to simulator-output directory after run
     #[arg(long)]
     dump_db: bool,
+    /// Replay a Quint ITF trace as scripted operations instead of random workloads
+    #[arg(long)]
+    script_itf: Option<PathBuf>,
+    /// Fail on unmapped or out-of-range scripted actions from the ITF trace
+    #[arg(long, requires = "script_itf")]
+    script_strict: bool,
+    /// Number of times to replay the scripted ITF sequence
+    #[arg(
+        long,
+        requires = "script_itf",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    script_repeat: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -158,6 +174,35 @@ fn build_opts(args: &Args, seed: u64) -> anyhow::Result<WhopperOpts> {
         base_opts = base_opts.with_max_steps(max_steps);
     }
 
+    let scripted_steps = if let Some(path) = args.script_itf.as_ref() {
+        let steps = load_scripted_steps_from_itf(
+            path.as_path(),
+            args.script_strict,
+            args.max_connections,
+            args.script_repeat as usize,
+        )
+        .with_context(|| format!("failed to load scripted ITF from {}", path.display()))?;
+        println!(
+            "scripted ITF replay enabled: {} (steps={})",
+            path.display(),
+            steps.len()
+        );
+
+        if args.max_steps.is_none() {
+            let script_budget = steps
+                .len()
+                .saturating_mul(args.max_connections.max(1))
+                .saturating_mul(64);
+            if script_budget > base_opts.max_steps {
+                base_opts = base_opts.with_max_steps(script_budget);
+            }
+        }
+
+        steps
+    } else {
+        vec![]
+    };
+
     // Build workloads and properties based on Elle mode
     let (workloads, properties, elle_tables, chaotic_profiles) = if let Some(elle_model) = args.elle
     {
@@ -255,7 +300,8 @@ fn build_opts(args: &Args, seed: u64) -> anyhow::Result<WhopperOpts> {
         .with_elle_tables(elle_tables)
         .with_workloads(workloads)
         .with_properties(properties)
-        .with_chaotic_profiles(chaotic_profiles);
+        .with_chaotic_profiles(chaotic_profiles)
+        .with_scripted_steps(scripted_steps);
 
     Ok(opts)
 }

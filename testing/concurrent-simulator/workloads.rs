@@ -21,6 +21,7 @@ use crate::{FiberState, SimulatorState};
 /// Note: `rng` is passed separately to `Workload::generate` to avoid borrow conflicts
 /// when calling `Arbitrary::arbitrary(rng, ctx)` which needs both `&mut rng` and `&ctx`.
 pub struct WorkloadContext<'a> {
+    pub fiber_id: usize,
     pub fiber_state: &'a FiberState,
     pub sim_state: &'a SimulatorState,
     pub opts: &'a Opts,

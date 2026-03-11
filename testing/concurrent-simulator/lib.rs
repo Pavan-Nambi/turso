@@ -23,12 +23,14 @@ pub mod elle;
 mod io;
 mod operations;
 pub mod properties;
+pub mod script_itf;
 pub mod workloads;
 
 use crate::{
     chaotic_elle::{ChaoticWorkload, ChaoticWorkloadProfile},
     io::FILE_SIZE_SOFT_LIMIT,
     properties::Property,
+    script_itf::{ScriptedAction, ScriptedStep},
     workloads::{Workload, WorkloadContext},
 };
 pub use io::{IOFaultConfig, SimulatorIO};
@@ -215,6 +217,8 @@ pub struct WhopperOpts {
     /// On each idle step, each profile fires with the given probability (0.0–1.0).
     /// If none fires, regular workloads run instead.
     pub chaotic_profiles: Vec<(f64, &'static str, Box<dyn ChaoticWorkloadProfile>)>,
+    /// Optional deterministic scripted replay steps derived from Quint ITF.
+    pub scripted_steps: Vec<ScriptedStep>,
 }
 
 impl Default for WhopperOpts {
@@ -231,6 +235,7 @@ impl Default for WhopperOpts {
             workloads: vec![],
             properties: vec![],
             chaotic_profiles: vec![],
+            scripted_steps: vec![],
         }
     }
 }
@@ -318,6 +323,11 @@ impl WhopperOpts {
         self.chaotic_profiles = profiles;
         self
     }
+
+    pub fn with_scripted_steps(mut self, steps: Vec<ScriptedStep>) -> Self {
+        self.scripted_steps = steps;
+        self
+    }
 }
 
 /// Statistics collected during simulation.
@@ -340,6 +350,28 @@ pub enum StepResult {
     Ok,
     /// WAL file size exceeded soft limit, simulation should stop.
     WalSizeLimitExceeded,
+}
+
+struct ScriptedReplay {
+    steps: Vec<ScriptedStep>,
+    cursor: usize,
+}
+
+impl ScriptedReplay {
+    fn new(steps: Vec<ScriptedStep>) -> Self {
+        Self { steps, cursor: 0 }
+    }
+
+    fn is_done(&self) -> bool {
+        self.cursor >= self.steps.len()
+    }
+}
+
+enum ScriptDispatchResult {
+    Disabled,
+    WaitingForFiber,
+    SetOperation,
+    ConsumedNoop,
 }
 
 pub struct SimulatorFiber {
@@ -438,12 +470,29 @@ pub struct Whopper {
     pub stats: Stats,
     /// Chaotic workload profiles: (probability, name, profile).
     chaotic_profiles: Vec<(f64, &'static str, Box<dyn ChaoticWorkloadProfile>)>,
+    /// Deterministic scripted replay, when enabled.
+    scripted_replay: Option<ScriptedReplay>,
 }
 
 impl Whopper {
     /// Create a new Whopper simulator with the given options.
     pub fn new(opts: WhopperOpts) -> anyhow::Result<Self> {
-        let seed = opts.seed.unwrap_or_else(|| {
+        let WhopperOpts {
+            seed,
+            max_connections,
+            max_steps,
+            cosmic_ray_probability,
+            keep_files,
+            enable_mvcc,
+            enable_encryption,
+            elle_tables,
+            workloads,
+            properties,
+            chaotic_profiles,
+            scripted_steps,
+        } = opts;
+
+        let seed = seed.unwrap_or_else(|| {
             let mut rng = rand::rng();
             rng.next_u64()
         });
@@ -454,16 +503,16 @@ impl Whopper {
         let io_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(1));
 
         let fault_config = IOFaultConfig {
-            cosmic_ray_probability: opts.cosmic_ray_probability,
+            cosmic_ray_probability,
         };
 
-        let io = Arc::new(SimulatorIO::new(opts.keep_files, io_rng, fault_config));
+        let io = Arc::new(SimulatorIO::new(keep_files, io_rng, fault_config));
         let file_sizes = io.file_sizes();
 
         let db_path = format!("whopper-{}-{}.db", seed, std::process::id());
         let wal_path = format!("{db_path}-wal");
 
-        let encryption_opts = if opts.enable_encryption {
+        let encryption_opts = if enable_encryption {
             Some(random_encryption_config(&mut rng))
         } else {
             None
@@ -494,7 +543,7 @@ impl Whopper {
         };
 
         // Enable MVCC if requested
-        if opts.enable_mvcc {
+        if enable_mvcc {
             bootstrap_conn.execute("PRAGMA journal_mode = 'mvcc'")?;
         }
 
@@ -515,7 +564,7 @@ impl Whopper {
 
         // Create Elle tables if configured
         let mut elle_table_names = Vec::new();
-        for (table_name, create_sql) in &opts.elle_tables {
+        for (table_name, create_sql) in &elle_tables {
             debug!("{}", create_sql);
             bootstrap_conn.execute(create_sql)?;
             elle_table_names.push(table_name.clone());
@@ -536,10 +585,15 @@ impl Whopper {
         let context = SimulatorContext {
             fibers: vec![],
             state,
-            enable_mvcc: opts.enable_mvcc,
+            enable_mvcc,
         };
 
-        let total_weight: u32 = opts.workloads.iter().map(|(w, _)| w).sum();
+        let total_weight: u32 = workloads.iter().map(|(w, _)| w).sum();
+        let scripted_replay = if scripted_steps.is_empty() {
+            None
+        } else {
+            Some(ScriptedReplay::new(scripted_steps))
+        };
 
         let mut whopper = Self {
             context,
@@ -549,20 +603,17 @@ impl Whopper {
             db_path,
             wal_path,
             encryption_opts,
-            max_connections: opts.max_connections,
-            workloads: opts.workloads,
-            properties: opts
-                .properties
-                .into_iter()
-                .map(std::sync::Mutex::new)
-                .collect(),
+            max_connections,
+            workloads,
+            properties: properties.into_iter().map(std::sync::Mutex::new).collect(),
             total_weight,
             opts: Opts::default(),
             current_step: 0,
-            max_steps: opts.max_steps,
+            max_steps,
             seed,
             stats: Stats::default(),
-            chaotic_profiles: opts.chaotic_profiles,
+            chaotic_profiles,
+            scripted_replay,
         };
 
         whopper.open_connections()?;
@@ -572,7 +623,20 @@ impl Whopper {
 
     /// Check if the simulation is complete (reached max steps or WAL limit).
     pub fn is_done(&self) -> bool {
-        self.current_step >= self.max_steps
+        if self.current_step >= self.max_steps {
+            return true;
+        }
+        if let Some(scripted) = &self.scripted_replay
+            && scripted.is_done()
+            && !self
+                .context
+                .fibers
+                .iter()
+                .any(|fiber| fiber.statement.borrow().is_some() || fiber.current_op.is_some())
+        {
+            return true;
+        }
+        false
     }
 
     /// Perform a single simulation step.
@@ -584,7 +648,7 @@ impl Whopper {
             return Ok(StepResult::Ok);
         }
 
-        let fiber_idx = self.current_step % self.context.fibers.len();
+        let fiber_idx = self.select_fiber_for_step();
         self.perform_work(fiber_idx)?;
         self.io.step()?;
         self.current_step += 1;
@@ -594,6 +658,27 @@ impl Whopper {
         }
 
         Ok(StepResult::Ok)
+    }
+
+    fn select_fiber_for_step(&self) -> usize {
+        // When scripted replay is enabled, always finish any in-flight work first.
+        // This keeps ITF operations in strict order and avoids artificial scheduler noise.
+        if self.scripted_replay.is_some() {
+            if let Some(idx) = self.context.fibers.iter().position(|fiber| {
+                fiber.statement.borrow().is_some() || fiber.current_op.is_some()
+            }) {
+                return idx;
+            }
+
+            if let Some(scripted) = &self.scripted_replay
+                && !scripted.is_done()
+                && let Some(step) = scripted.steps.get(scripted.cursor)
+            {
+                return step.fiber_id.min(self.context.fibers.len().saturating_sub(1));
+            }
+        }
+
+        self.current_step % self.context.fibers.len()
     }
 
     fn perform_work(&mut self, fiber_idx: usize) -> anyhow::Result<()> {
@@ -744,45 +829,57 @@ impl Whopper {
         }
 
         if self.context.fibers[fiber_idx].current_op.is_none() {
-            // Try chaotic workload first
-            if !self.chaotic_profiles.is_empty() {
-                self.try_resume_chaotic(fiber_idx);
-            }
-
-            // Fall through to regular workloads if chaotic didn't produce an op
-            if self.context.fibers[fiber_idx].current_op.is_some() {
-                // chaotic workload produced an op, skip regular workloads
-            } else if self.total_weight == 0 {
-                return Ok(());
-            } else {
-                let mut roll = self.rng.random_range(0..self.total_weight);
-                for (weight, workload) in &self.workloads {
-                    if roll >= *weight {
-                        roll = roll.saturating_sub(*weight);
-                        continue;
+            match self.dispatch_scripted_step(fiber_idx)? {
+                ScriptDispatchResult::SetOperation => {}
+                ScriptDispatchResult::ConsumedNoop | ScriptDispatchResult::WaitingForFiber => {
+                    return Ok(());
+                }
+                ScriptDispatchResult::Disabled => {
+                    // Try chaotic workload first
+                    if !self.chaotic_profiles.is_empty() {
+                        self.try_resume_chaotic(fiber_idx);
                     }
-                    let fiber = &self.context.fibers[fiber_idx];
-                    let state_str = format!("{:?}", &fiber.state);
-                    let span =
-                        tracing::debug_span!("generate", fiber = fiber_idx, state = state_str);
-                    let _enter = span.enter();
 
-                    let ctx = WorkloadContext {
-                        fiber_state: &fiber.state,
-                        sim_state: &self.context.state,
-                        opts: &self.opts,
-                        enable_mvcc: self.context.enable_mvcc,
-                        tables_vec: self.context.state.tables_vec(),
-                    };
+                    // Fall through to regular workloads if chaotic didn't produce an op
+                    if self.context.fibers[fiber_idx].current_op.is_some() {
+                        // chaotic workload produced an op, skip regular workloads
+                    } else if self.total_weight == 0 {
+                        return Ok(());
+                    } else {
+                        let mut roll = self.rng.random_range(0..self.total_weight);
+                        for (weight, workload) in &self.workloads {
+                            if roll >= *weight {
+                                roll = roll.saturating_sub(*weight);
+                                continue;
+                            }
+                            let fiber = &self.context.fibers[fiber_idx];
+                            let state_str = format!("{:?}", &fiber.state);
+                            let span = tracing::debug_span!(
+                                "generate",
+                                fiber = fiber_idx,
+                                state = state_str
+                            );
+                            let _enter = span.enter();
 
-                    // Generate operation from workload; skip current workload if it returned None
-                    let Some(op) = workload.generate(&ctx, &mut self.rng) else {
-                        continue;
-                    };
+                            let ctx = WorkloadContext {
+                                fiber_id: fiber_idx,
+                                fiber_state: &fiber.state,
+                                sim_state: &self.context.state,
+                                opts: &self.opts,
+                                enable_mvcc: self.context.enable_mvcc,
+                                tables_vec: self.context.state.tables_vec(),
+                            };
 
-                    debug!("set fiber operation: {:?}", op);
-                    self.context.fibers[fiber_idx].current_op = Some(op);
-                    break;
+                            // Generate operation from workload; skip current workload if it returned None
+                            let Some(op) = workload.generate(&ctx, &mut self.rng) else {
+                                continue;
+                            };
+
+                            debug!("set fiber operation: {:?}", op);
+                            self.context.fibers[fiber_idx].current_op = Some(op);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -841,6 +938,51 @@ impl Whopper {
         }
 
         Ok(())
+    }
+
+    fn dispatch_scripted_step(&mut self, fiber_idx: usize) -> anyhow::Result<ScriptDispatchResult> {
+        let Some(scripted) = &self.scripted_replay else {
+            return Ok(ScriptDispatchResult::Disabled);
+        };
+        if scripted.is_done() {
+            return Ok(ScriptDispatchResult::WaitingForFiber);
+        }
+
+        let step = scripted
+            .steps
+            .get(scripted.cursor)
+            .expect("scripted cursor should reference a valid step")
+            .clone();
+
+        if step.fiber_id != fiber_idx {
+            return Ok(ScriptDispatchResult::WaitingForFiber);
+        }
+
+        match step.action {
+            ScriptedAction::Operation(op) => {
+                debug!(
+                    "scripted: dispatch op on fiber {} from action `{}`: {:?}",
+                    fiber_idx, step.source_action, op
+                );
+                self.context.fibers[fiber_idx].current_op = Some(op);
+            }
+            ScriptedAction::Reopen => {
+                debug!(
+                    "scripted: reopen on fiber {} from action `{}`",
+                    fiber_idx, step.source_action
+                );
+                self.reopen()?;
+                if let Some(scripted) = &mut self.scripted_replay {
+                    scripted.cursor += 1;
+                }
+                return Ok(ScriptDispatchResult::ConsumedNoop);
+            }
+        }
+
+        if let Some(scripted) = &mut self.scripted_replay {
+            scripted.cursor += 1;
+        }
+        Ok(ScriptDispatchResult::SetOperation)
     }
 
     /// Try to resume or start a chaotic workload for the given fiber.

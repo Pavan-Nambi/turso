@@ -8,6 +8,7 @@ pub mod oracle;
 pub mod printf_gen;
 pub mod runner;
 pub mod schema;
+pub mod seed_corpus;
 
 pub use generate::{GeneratedStatement, GeneratorKind, SqlGenerator};
 pub use memory::{MemorySimFile, MemorySimIO, SimIO};

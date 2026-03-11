@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QuintTraceManifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at_utc",
+    "seed",
+    "spec_path",
+    "spec_sha256",
+    "quint_version",
+    "backend",
+    "n_traces",
+    "max_steps",
+    "max_samples",
+    "trace_files"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generated_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "seed": {
+      "type": "string"
+    },
+    "spec_path": {
+      "type": "string"
+    },
+    "spec_sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "quint_version": {
+      "type": "string"
+    },
+    "backend": {
+      "type": "string",
+      "enum": ["rust", "typescript"]
+    },
+    "n_traces": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_samples": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "invariant": {
+      "type": ["string", "null"]
+    },
+    "witness": {
+      "type": ["string", "null"]
+    },
+    "trace_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false
+}

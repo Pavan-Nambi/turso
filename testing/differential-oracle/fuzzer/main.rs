@@ -58,6 +58,9 @@ struct Args {
     /// Enable experimental MVCC mode.
     #[arg(long)]
     mvcc: bool,
+    /// Path to seed corpus file/directory (SQL or Quint ITF) for prelude replay.
+    #[arg(long)]
+    seed_corpus: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -94,6 +97,7 @@ struct ConfigRecord {
     num_statements: usize,
     generator: String,
     mvcc: bool,
+    seed_corpus: Option<String>,
 }
 
 /// Summary written to the JSON report file.
@@ -112,6 +116,10 @@ impl ConfigRecord {
             num_statements: args.num_statements,
             generator: format!("{:?}", args.generator),
             mvcc: args.mvcc,
+            seed_corpus: args
+                .seed_corpus
+                .as_ref()
+                .map(|path| path.display().to_string()),
         }
     }
 }
@@ -240,6 +248,7 @@ fn run_single_inner(args: &Args) -> Result<differential_fuzzer::SimStats> {
             TreeMode::Simplified
         },
         mvcc: args.mvcc,
+        seed_corpus: args.seed_corpus.clone(),
     };
 
     tracing::info!("Starting differential_fuzzer with config: {:?}", config);
