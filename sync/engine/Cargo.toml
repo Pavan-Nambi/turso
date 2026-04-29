@@ -27,6 +27,7 @@ libc = { version = "0.2.172" }
 
 [dev-dependencies]
 ctor = "0.4.2"
+quint-connect = "0.1.1"
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio = { workspace = true, features = [

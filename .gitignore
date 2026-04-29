@@ -72,6 +72,9 @@ testing/sqltests/database/integrity_*.db
 # For simulator redo
 test.sql
 
+# Quint/Apalache generated model-checker output
+_apalache-out/
+
 # for elle edn transaction history
 *.edn
 elle-history-results/
