@@ -690,6 +690,8 @@ pub trait Wal: Debug + Send + Sync {
 
     /// For each prepared frame, update in-memory WAL index and rolling checksum
     /// and advance max_frame to make committed frames visible to readers.
+    fn commit_prepared_frame(&self, page: &PageRef, frame_id: u64, checksum: (u32, u32));
+
     fn commit_prepared_frames(&self, prepared: &[PreparedFrames]);
 
     /// Mark in-memory pages clean and set WAL tags after durable commit.
@@ -4257,13 +4259,17 @@ impl Wal for WalFile {
         })
     }
 
+    fn commit_prepared_frame(&self, page: &PageRef, frame_id: u64, checksum: (u32, u32)) {
+        self.complete_append_frame(page.get().id as u64, frame_id, checksum);
+    }
+
     /// For each prepared frame, update in-memory WAL index and rolling checksum.
     /// and advance max_frame to make frames visible to readers.
     fn commit_prepared_frames(&self, batches: &[PreparedFrames]) {
         for batch in batches {
             for (page, frame_id, checksum) in &batch.metadata {
                 // Update WAL index mapping page -> frame
-                self.complete_append_frame(page.get().id as u64, *frame_id, *checksum);
+                self.commit_prepared_frame(page, *frame_id, *checksum);
             }
             // Update rolling checksum
             *self.last_checksum.write() = batch.final_checksum;
@@ -4871,7 +4877,7 @@ impl WalFile {
     /// because we might overwrite content the reader is reading from the database file.
     ///
     /// A checkpoint must never overwrite a page in the main DB file if some
-    /// active reader might still need to read that page from the WAL.  
+    /// active reader might still need to read that page from the WAL.
     /// Concretely: the checkpoint may only copy frames `<= aReadMark[k]` for
     /// every in-use reader slot `k > 0`.
     ///
