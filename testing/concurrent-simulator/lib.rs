@@ -13,6 +13,7 @@ use sql_generation::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
+use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::sync::Arc;
 use tracing::{debug, error, trace};
@@ -33,6 +34,8 @@ pub mod error_handling;
 mod io;
 #[cfg(all(any(unix, target_os = "windows"), target_pointer_width = "64"))]
 pub mod multiprocess;
+pub mod mvcc_mbt;
+pub mod mvcc_mbt_campaign;
 pub mod operations;
 pub mod properties;
 #[cfg(all(any(unix, target_os = "windows"), target_pointer_width = "64"))]
@@ -68,6 +71,53 @@ pub fn multiprocess_platform_io() -> anyhow::Result<Arc<dyn IO>> {
 pub use io::{IOFaultConfig, SimulatorIO};
 pub use operations::{FiberState, OpContext, OpResult, Operation, TxMode};
 use yield_injection::{SimulatorYieldInjector, fiber_yield_seed};
+
+/// Policy used to select the fiber advanced by each simulator step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiberSchedulePolicy {
+    /// Advance fibers in stable round-robin order.
+    RoundRobin,
+    /// Choose a fiber and let it run for a random bounded number of steps.
+    RandomQuantum { max_quantum: NonZeroUsize },
+}
+
+#[derive(Debug)]
+struct FiberScheduler {
+    policy: FiberSchedulePolicy,
+    rng: ChaCha8Rng,
+    selected_fiber: usize,
+    quantum_remaining: usize,
+}
+
+impl FiberScheduler {
+    fn new(policy: FiberSchedulePolicy, seed: u64) -> Self {
+        Self {
+            policy,
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            selected_fiber: 0,
+            quantum_remaining: 0,
+        }
+    }
+
+    fn select(&mut self, current_step: usize, fiber_count: usize) -> usize {
+        assert!(fiber_count > 0, "Whopper requires at least one fiber");
+        match self.policy {
+            FiberSchedulePolicy::RoundRobin => current_step % fiber_count,
+            FiberSchedulePolicy::RandomQuantum { max_quantum } => {
+                if self.quantum_remaining == 0 {
+                    self.selected_fiber = self.rng.random_range(0..fiber_count);
+                    self.quantum_remaining = self.rng.random_range(1..=max_quantum.get());
+                }
+                self.quantum_remaining -= 1;
+                self.selected_fiber
+            }
+        }
+    }
+
+    fn surrender_quantum(&mut self) {
+        self.quantum_remaining = 0;
+    }
+}
 
 struct InstalledYieldInjector<'a> {
     connection: &'a Arc<Connection>,
@@ -258,8 +308,17 @@ impl<K: Ord + Clone, V: Clone> MergableMap<K, V> {
 
 /// Configuration options for the Whopper simulator.
 pub struct WhopperOpts {
-    /// Random seed for deterministic simulation. If None, a random seed is generated.
+    /// Base seed for workload/environment choices. If None, a random seed is generated.
     pub seed: Option<u64>,
+    /// Optional independent seed for simulated I/O choices.
+    pub io_seed: Option<u64>,
+    /// Optional independent seed for injected-yield plans.
+    pub yield_seed: Option<u64>,
+    /// Optional independent seed for actor scheduling.
+    pub fiber_schedule_seed: Option<u64>,
+    /// Surface operation-initialization errors instead of applying Whopper's
+    /// legacy skip policy for expected random-workload schema races.
+    pub strict_operation_init_errors: bool,
     /// Maximum number of concurrent connections (1-8 typical).
     pub max_connections: usize,
     /// Maximum number of simulation steps to run.
@@ -303,6 +362,8 @@ pub struct WhopperOpts {
     pub reopen_probability: f64,
     /// Probability of failing a scoped Turso allocation while stepping a statement.
     pub allocation_fault_probability: f64,
+    /// Policy used to select the fiber advanced by each simulator step.
+    pub fiber_schedule_policy: FiberSchedulePolicy,
 }
 
 /// Schema-generation bias
@@ -334,6 +395,10 @@ impl Default for WhopperOpts {
     fn default() -> Self {
         Self {
             seed: None,
+            io_seed: None,
+            yield_seed: None,
+            fiber_schedule_seed: None,
+            strict_operation_init_errors: false,
             max_connections: 4,
             max_steps: 100_000,
             max_drain_steps: 1_000_000,
@@ -351,6 +416,7 @@ impl Default for WhopperOpts {
             close_connections_gracefully: true,
             reopen_probability: 0.0,
             allocation_fault_probability: 0.0,
+            fiber_schedule_policy: FiberSchedulePolicy::RoundRobin,
         }
     }
 }
@@ -431,6 +497,26 @@ impl WhopperOpts {
         self
     }
 
+    pub fn with_io_seed(mut self, seed: u64) -> Self {
+        self.io_seed = Some(seed);
+        self
+    }
+
+    pub fn with_yield_seed(mut self, seed: u64) -> Self {
+        self.yield_seed = Some(seed);
+        self
+    }
+
+    pub fn with_fiber_schedule_seed(mut self, seed: u64) -> Self {
+        self.fiber_schedule_seed = Some(seed);
+        self
+    }
+
+    pub fn with_strict_operation_init_errors(mut self, strict: bool) -> Self {
+        self.strict_operation_init_errors = strict;
+        self
+    }
+
     pub fn with_max_connections(mut self, max_connections: usize) -> Self {
         self.max_connections = max_connections;
         self
@@ -496,6 +582,16 @@ impl WhopperOpts {
 
     pub fn with_allocation_fault_probability(mut self, probability: f64) -> Self {
         self.allocation_fault_probability = probability;
+        self
+    }
+
+    /// Randomize fiber selection and keep the selected fiber runnable for at
+    /// most `max_quantum` consecutive simulator steps.
+    pub fn with_randomized_fiber_quantum(mut self, max_quantum: usize) -> Self {
+        self.fiber_schedule_policy = FiberSchedulePolicy::RandomQuantum {
+            max_quantum: NonZeroUsize::new(max_quantum)
+                .expect("randomized fiber quantum must be positive"),
+        };
         self
     }
 }
@@ -644,6 +740,8 @@ pub struct Whopper {
     pub max_steps: usize,
     pub max_drain_steps: usize,
     pub seed: u64,
+    yield_seed: u64,
+    strict_operation_init_errors: bool,
     pub stats: Stats,
     /// Chaotic workload profiles: (probability, name, profile).
     chaotic_profiles: Vec<(f64, &'static str, Box<dyn ChaoticWorkloadProfile>)>,
@@ -654,6 +752,7 @@ pub struct Whopper {
     /// If false, drop fiber connections without first closing them.
     close_connections_gracefully: bool,
     allocation_fault_injector: Option<&'static SimulatorAllocationFaultInjector>,
+    fiber_scheduler: FiberScheduler,
 }
 
 impl Whopper {
@@ -672,8 +771,14 @@ impl Whopper {
             seed.wrapping_add(2),
         )?;
 
-        // Create a separate RNG for IO operations with a derived seed
-        let io_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(1));
+        // Preserve the historical derivation unless a campaign explicitly
+        // separates I/O from the workload/environment seed.
+        let io_seed = opts.io_seed.unwrap_or_else(|| seed.wrapping_add(1));
+        let io_rng = ChaCha8Rng::seed_from_u64(io_seed);
+        let yield_seed = opts.yield_seed.unwrap_or(seed);
+        let fiber_schedule_seed = opts
+            .fiber_schedule_seed
+            .unwrap_or_else(|| seed.wrapping_add(3));
 
         let fault_config = IOFaultConfig {
             cosmic_ray_probability: opts.cosmic_ray_probability,
@@ -806,12 +911,15 @@ impl Whopper {
             max_steps: opts.max_steps,
             max_drain_steps: opts.max_drain_steps,
             seed,
+            yield_seed,
+            strict_operation_init_errors: opts.strict_operation_init_errors,
             stats: Stats::default(),
             chaotic_profiles: opts.chaotic_profiles,
             disable_mvcc_auto_checkpoint: opts.disable_mvcc_auto_checkpoint,
             experimental_mvcc_passive_checkpoint: opts.experimental_mvcc_passive_checkpoint,
             close_connections_gracefully: opts.close_connections_gracefully,
             allocation_fault_injector,
+            fiber_scheduler: FiberScheduler::new(opts.fiber_schedule_policy, fiber_schedule_seed),
         };
 
         whopper.open_connections()?;
@@ -839,8 +947,14 @@ impl Whopper {
             return Ok(StepResult::Ok);
         }
 
-        let fiber_idx = self.current_step % self.context.fibers.len();
+        let fiber_idx = self
+            .fiber_scheduler
+            .select(self.current_step, self.context.fibers.len());
+        let was_idle = self.context.fibers[fiber_idx].current_op.is_none();
         self.perform_work(fiber_idx)?;
+        if was_idle && self.context.fibers[fiber_idx].current_op.is_none() {
+            self.fiber_scheduler.surrender_quantum();
+        }
         self.io.step()?;
         self.current_step += 1;
 
@@ -1043,6 +1157,7 @@ impl Whopper {
                     let _enter = span.enter();
 
                     let ctx = WorkloadContext {
+                        fiber_id: fiber_idx,
                         fiber_state: &fiber.state,
                         sim_state: &self.context.state,
                         opts: &self.opts,
@@ -1088,10 +1203,17 @@ impl Whopper {
             };
             debug!("prepare operation: op={:?}", op);
             ctx.fiber.yield_injector = Arc::new(SimulatorYieldInjector::new(fiber_yield_seed(
-                self.seed, fiber_idx,
+                self.yield_seed,
+                fiber_idx,
             )));
             if let Err(e) = op.init_op(&mut ctx) {
                 let err = e.to_string().to_lowercase();
+                if self.strict_operation_init_errors {
+                    return Err(anyhow::anyhow!(
+                        "Failed to initialize operation on fiber {fiber_idx}: {e}\nSQL: {}",
+                        op.sql()
+                    ));
+                }
                 // Allow "no such table/index" and "already exists" errors
                 if err.contains("no such")
                     || err.contains("already exists")
@@ -1547,7 +1669,8 @@ impl Whopper {
             self.context.fibers.push(SimulatorFiber {
                 connection: conn,
                 yield_injector: Arc::new(SimulatorYieldInjector::new(fiber_yield_seed(
-                    self.seed, i,
+                    self.yield_seed,
+                    i,
                 ))),
                 state: FiberState::Idle,
                 statement: RefCell::new(None),

@@ -91,6 +91,42 @@ struct Args {
     /// Stream multiprocess operation/lifecycle history as JSONL for deterministic debugging
     #[arg(long)]
     history_output: Option<PathBuf>,
+    /// Replay a Quint-generated MVCC semantic program.
+    #[arg(long, conflicts_with = "mvcc_mbt_corpus_dir")]
+    mvcc_mbt_itf: Option<PathBuf>,
+    /// Replay every trace_N.itf.json program in a generated Quint corpus.
+    #[arg(long, conflicts_with = "mvcc_mbt_itf")]
+    mvcc_mbt_corpus_dir: Option<PathBuf>,
+    /// Number of generated traces to load before semantic deduplication.
+    #[arg(long, default_value_t = 256)]
+    mvcc_mbt_trace_count: usize,
+    /// Number of independently derived actor-scheduler seeds per MBT program.
+    #[arg(long, default_value_t = 1)]
+    mvcc_mbt_actor_schedules: usize,
+    /// Number of independently derived injected-yield-plan seeds per MBT program.
+    #[arg(long, default_value_t = 1)]
+    mvcc_mbt_yield_plans: usize,
+    /// Override the first actor-scheduler seed for an MBT search.
+    #[arg(long)]
+    mvcc_mbt_first_actor_seed: Option<u64>,
+    /// Override the first injected-yield-plan seed for an MBT search.
+    #[arg(long)]
+    mvcc_mbt_first_yield_seed: Option<u64>,
+    /// Override the workload/environment seed for an MBT search.
+    #[arg(long)]
+    mvcc_mbt_environment_seed: Option<u64>,
+    /// Override the simulated-I/O seed for an MBT search.
+    #[arg(long)]
+    mvcc_mbt_io_seed: Option<u64>,
+    /// Explore the full requested MBT grid after finding a failure.
+    #[arg(long)]
+    mvcc_mbt_keep_going: bool,
+    /// Write the machine-readable MBT outcome to this JSON file.
+    #[arg(long)]
+    mvcc_mbt_report_json: Option<PathBuf>,
+    /// Directory for per-trace and aggregate corpus reports.
+    #[arg(long)]
+    mvcc_mbt_report_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -152,9 +188,116 @@ fn main() -> anyhow::Result<()> {
             "--enable-experimental-mvcc-passive-checkpoint requires --enable-mvcc"
         ));
     }
-
     println!("mode = {}", args.mode);
     println!("seed = {seed}");
+
+    if args.mvcc_mbt_itf.is_some() || args.mvcc_mbt_corpus_dir.is_some() {
+        if args.multiprocess {
+            return Err(anyhow::anyhow!(
+                "MVCC MBT uses Whopper's in-process deterministic scheduler"
+            ));
+        }
+        let mut first_seeds = turso_whopper::mvcc_mbt::MbtReplaySeeds::from_base(seed);
+        first_seeds.environment = args
+            .mvcc_mbt_environment_seed
+            .unwrap_or(first_seeds.environment);
+        first_seeds.actor_schedule = args
+            .mvcc_mbt_first_actor_seed
+            .unwrap_or(first_seeds.actor_schedule);
+        first_seeds.yield_plan = args
+            .mvcc_mbt_first_yield_seed
+            .unwrap_or(first_seeds.yield_plan);
+        first_seeds.io = args.mvcc_mbt_io_seed.unwrap_or(first_seeds.io);
+        let run_config = turso_whopper::mvcc_mbt::MbtRunConfig {
+            first_seeds,
+            actor_schedules: args.mvcc_mbt_actor_schedules,
+            yield_plans: args.mvcc_mbt_yield_plans,
+            fail_fast: !args.mvcc_mbt_keep_going,
+        };
+        if let Some(corpus_dir) = &args.mvcc_mbt_corpus_dir {
+            let report_dir = args.mvcc_mbt_report_dir.clone().ok_or_else(|| {
+                anyhow::anyhow!("--mvcc-mbt-corpus-dir requires --mvcc-mbt-report-dir")
+            })?;
+            let report = turso_whopper::mvcc_mbt_campaign::run_corpus(
+                turso_whopper::mvcc_mbt_campaign::MbtCorpusConfig {
+                    corpus_dir: corpus_dir.clone(),
+                    report_dir,
+                    trace_count: args.mvcc_mbt_trace_count,
+                    run: run_config,
+                },
+            )?;
+            if let Some(report_path) = &args.mvcc_mbt_report_json {
+                std::fs::write(report_path, serde_json::to_vec_pretty(&report)?)?;
+            }
+            println!(
+                "mvcc mbt corpus = {} distinct programs from {} fresh traces \
+                 x {} actor seeds x {} yield seeds \
+                 (passed={}, failed={}, unique_failures={})",
+                report.distinct_programs,
+                report.generated_traces,
+                report.actor_schedules,
+                report.yield_plans,
+                report.schedules_passed,
+                report.schedules_failed,
+                report.unique_failures,
+            );
+            println!("replay seed roots = {:?}", report.replay_seed_roots);
+            println!(
+                "writer/checkpoint operation overlap = {}/{} schedules",
+                report.schedules_with_writer_checkpoint_overlap, report.schedules_run,
+            );
+            for failure in &report.failures {
+                println!(
+                    "failure {:?}: {} occurrences, first trace {}",
+                    failure.fingerprint,
+                    failure.occurrences,
+                    failure.first_model_trace.display()
+                );
+            }
+            if report.has_failures() {
+                return Err(anyhow::anyhow!(
+                    "MVCC MBT found {} failure occurrences in {} unique classes",
+                    report.schedules_failed,
+                    report.unique_failures,
+                ));
+            }
+            return Ok(());
+        }
+
+        let path = args
+            .mvcc_mbt_itf
+            .as_ref()
+            .expect("checked that an MBT input was provided");
+        let outcome = turso_whopper::mvcc_mbt::run_itf(path, run_config)?;
+        if let Some(report_path) = &args.mvcc_mbt_report_json {
+            let bytes = serde_json::to_vec_pretty(&outcome)?;
+            std::fs::write(report_path, bytes)?;
+        }
+        let report = &outcome.report;
+        println!(
+            "mvcc mbt = {} commands x {} actor seeds x {} yield seeds \
+             (passed={}, failed={}, unique_failures={})",
+            report.command_count,
+            report.actor_schedules,
+            report.yield_plans,
+            report.schedules_passed,
+            report.schedules_failed,
+            report.unique_failures,
+        );
+        println!("replay seeds = {:?}", report.first_seeds);
+        println!(
+            "writer/checkpoint operation overlap = {}/{} schedules",
+            report.schedules_with_writer_checkpoint_overlap, report.schedules_run,
+        );
+        if outcome.has_failures() {
+            return Err(anyhow::anyhow!(
+                "MVCC MBT found {} failure occurrences in {} unique classes",
+                report.schedules_failed,
+                report.unique_failures
+            ));
+        }
+        return Ok(());
+    }
 
     if args.multiprocess {
         return run_multiprocess(&args, seed);

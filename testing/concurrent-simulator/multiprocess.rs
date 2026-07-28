@@ -786,6 +786,7 @@ impl MultiprocessWhopper {
                         continue;
                     }
                     let ctx = WorkloadContext {
+                        fiber_id: connection_idx,
                         fiber_state: &self.connection_states[connection_idx].fiber_state,
                         sim_state: &self.sim_state,
                         opts: &self.opts,

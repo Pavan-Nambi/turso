@@ -21,6 +21,7 @@ use crate::{FiberState, SimulatorState};
 /// Note: `rng` is passed separately to `Workload::generate` to avoid borrow conflicts
 /// when calling `Arbitrary::arbitrary(rng, ctx)` which needs both `&mut rng` and `&ctx`.
 pub struct WorkloadContext<'a> {
+    pub fiber_id: usize,
     pub fiber_state: &'a FiberState,
     pub sim_state: &'a SimulatorState,
     pub opts: &'a Opts,
@@ -873,6 +874,7 @@ mod tests {
         let opts = Opts::default();
         let tables_vec = vec![table];
         let ctx = WorkloadContext {
+            fiber_id: 0,
             fiber_state: &FiberState::InConcurrentTx,
             sim_state: &state,
             opts: &opts,
@@ -952,6 +954,7 @@ mod tests {
         let state = SimulatorState::new(vec![], vec![]);
         let opts = Opts::default();
         let ctx = WorkloadContext {
+            fiber_id: 0,
             fiber_state: &FiberState::Idle,
             sim_state: &state,
             opts: &opts,
