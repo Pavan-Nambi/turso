@@ -1,7 +1,7 @@
-// Generates bounded MVCC histories with setup, an optional pinned reader,
-// one concurrent writer, row/schema mutations, commit/rollback, and PASSIVE
-// checkpoints. It tracks committed, writer-private, and reader-snapshot state;
-// Safety checks isolation, transaction outcomes, and state validity.
+// Defines the abstract MVCC state, which operations are legal and when, how each
+// operation changes that state, and the safety rules every reachable state must
+// satisfy. Quint uses this model to generate legal histories and compute the
+// expected state after every step.
 module mvcc_semantic_programs {
   type Slot = {
     present: bool,
@@ -361,6 +361,7 @@ module mvcc_semantic_programs {
     DoneStutter,
   }
 
+  // While a writer is open, committed state must remain at its starting snapshot.
   val CommittedStateStableWhileWriterOpen =
     model.phase != Concurrent
       or not(model.writerOpen)
@@ -369,6 +370,7 @@ module mvcc_semantic_programs {
           and model.committed1 == model.snapshot1
       )
 
+  // A rollback must leave committed state at the writer's starting snapshot.
   val RollbackRestoresSnapshot =
     model.writerOutcome != Rollback
       or (
@@ -376,6 +378,7 @@ module mvcc_semantic_programs {
           and model.committed1 == model.snapshot1
       )
 
+  // A commit must make the writer's final private state the committed state.
   val CommitPublishesPendingState =
     model.writerOutcome != Commit
       or (
@@ -383,6 +386,7 @@ module mvcc_semantic_programs {
           and model.committed1 == model.pending1
       )
 
+  // A completed history must have a closed writer and a final transaction outcome.
   val CompletedTransactionClosed =
     model.phase != Done
       or (
@@ -393,6 +397,7 @@ module mvcc_semantic_programs {
           )
       )
 
+  // Every state must be valid, stay within campaign bounds, and obey the rules above.
   val Safety =
     validTable(model.committed0)
       and validTable(model.committed1)
