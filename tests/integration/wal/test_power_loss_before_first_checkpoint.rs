@@ -25,7 +25,7 @@ use std::sync::Arc;
 use turso_core::{Database, DatabaseOpts, OpenFlags, PlatformIO, SqliteDialect, IO};
 
 use crate::common::limbo_exec_rows;
-use crate::unreliable_io::UnreliableIo;
+use crate::unreliable_io::{SyncFailure, UnreliableIo};
 
 /// Committed (fsync-acknowledged) transactions must survive power loss even
 /// when the crash happens before the first checkpoint, i.e. while the data
@@ -139,6 +139,95 @@ fn test_page1_is_durable_in_main_file_before_first_wal_commit() {
         count, 10,
         "SQLite must recover all committed transactions from the crash image"
     );
+}
+
+/// Run `sql` and require it to fail, handing back the error.
+fn exec_expect_err(conn: &Arc<turso_core::Connection>, sql: &str) -> turso_core::LimboError {
+    let result = conn
+        .prepare(sql)
+        .and_then(|mut stmt| stmt.run_with_row_callback(|_| Ok(())));
+    match result {
+        Ok(_) => panic!("{sql:?} was expected to fail but succeeded"),
+        Err(err) => err,
+    }
+}
+
+/// The fsync of page 1 to the main database file can fail. The failure must
+/// surface as a statement error, and a retry on the same connection must
+/// redo the whole write-then-fsync sequence: after a failed fsync the OS may
+/// have dropped the written page without putting it on disk, so resuming as
+/// if the fsync happened leaves the main file empty on power loss — a WAL
+/// next to an empty database file, which reopening throws away along with
+/// every acknowledged commit inside it.
+///
+/// The failure is injected in both shapes a backend can deliver it: as an
+/// error completing the fsync (io_uring) and as an error submitting it
+/// (syscall backends).
+fn page1_fsync_failure_then_retry(failure: SyncFailure) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("crash.db");
+    let db_path_str = db_path.to_str().unwrap().to_string();
+
+    let io = Arc::new(UnreliableIo::new());
+    {
+        let db = Database::open_file(io.clone(), &db_path_str, Arc::new(SqliteDialect)).unwrap();
+        let conn = db.connect().unwrap();
+        limbo_exec_rows(&conn, "PRAGMA synchronous=FULL");
+
+        // The first write on a fresh database writes page 1 to the main file
+        // and fsyncs it before any WAL commit. Fail that fsync.
+        io.fail_next_sync(&db_path_str, failure);
+        exec_expect_err(&conn, "CREATE TABLE t(x)");
+
+        // The retry must write page 1 again and fsync it again. The dropped
+        // page-1 write of the failed attempt cannot be made durable by any
+        // later fsync.
+        limbo_exec_rows(&conn, "CREATE TABLE t(x)");
+        for i in 0..10 {
+            limbo_exec_rows(&conn, &format!("INSERT INTO t VALUES ({i})"));
+        }
+        // Crash: no clean shutdown, no checkpoint.
+        std::mem::forget(conn);
+        std::mem::forget(db);
+    }
+
+    // Power loss: only fsync-acknowledged bytes survive.
+    let durable = io.durable_files();
+    let durable_db = durable
+        .get(&db_path_str)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    assert!(
+        durable_db >= 4096,
+        "page 1 must be durable in the main database file even though its \
+         first fsync failed (got {durable_db} durable bytes); the retried \
+         statement must redo the write and the fsync"
+    );
+    for (path, bytes) in &durable {
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    // Reopen the crash image: every acknowledged commit must be recovered.
+    let io: Arc<dyn IO> = Arc::new(PlatformIO::new().unwrap());
+    let db = Database::open_file(io, &db_path_str, Arc::new(SqliteDialect)).unwrap();
+    let conn = db.connect().unwrap();
+    let rows = limbo_exec_rows(&conn, "SELECT count(*) FROM t");
+    assert_eq!(
+        rows,
+        vec![vec![rusqlite::types::Value::Integer(10)]],
+        "all 10 committed transactions must survive the power loss even \
+         though the first page-1 fsync failed and was retried"
+    );
+}
+
+#[test]
+fn test_page1_fsync_failure_in_completion_then_retry_keeps_durability() {
+    page1_fsync_failure_then_retry(SyncFailure::Completion);
+}
+
+#[test]
+fn test_page1_fsync_failure_at_submission_then_retry_keeps_durability() {
+    page1_fsync_failure_then_retry(SyncFailure::Submission);
 }
 
 /// A WAL that holds frames next to a database file with zero pages does not

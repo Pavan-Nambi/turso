@@ -5748,6 +5748,21 @@ impl Pager {
         *self.allocate_page_state.write() = AllocatePageState::Start;
         *self.free_page_state.write() = FreePageState::Start;
         *self.spill_state.write() = SpillState::Idle;
+        {
+            // A rolled-back statement can leave the page 1 allocation parked
+            // at a yield point whose write or fsync failed. Re-entering the
+            // parked state would treat that IO as done and mark the database
+            // initialized without page 1 being durable — and a failed fsync
+            // may have thrown the write away for good, so only redoing both
+            // the write and the fsync makes page 1 durable.
+            let mut state = self.allocate_page1_state.write();
+            if let AllocatePage1State::Writing { page } | AllocatePage1State::Syncing { page } =
+                &*state
+            {
+                page.unpin();
+                *state = AllocatePage1State::Start;
+            }
+        }
         #[cfg(not(feature = "omit_autovacuum"))]
         {
             let mut vacuum_state = self.vacuum_state.write();

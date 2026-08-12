@@ -26,16 +26,34 @@
 //! To reopen a database on a materialized post-crash image, write each
 //! file's bytes to disk and open with the regular platform IO.
 //!
-//! Other kinds of storage misbehavior tests need — injected write or fsync
-//! errors, reordered writeback — belong in this module too.
+//! The module can also inject a failed fsync: arm it with
+//! [`UnreliableIo::fail_next_sync`]. A failed fsync throws away the file's
+//! pending unsynced writes for good, because that is what Linux does — the
+//! kernel marks the dirty pages clean without writing them, so a later
+//! fsync succeeds without ever putting them on disk. Only rewriting the
+//! data and fsyncing again makes it durable.
+//!
+//! Other kinds of storage misbehavior tests need — injected write errors,
+//! reordered writeback — belong in this module too.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use turso_core::{
-    io::FileSyncType, Buffer, Clock, Completion, File, MonotonicInstant, OpenFlags,
-    WallClockInstant, IO,
+    io::FileSyncType, Buffer, Clock, Completion, CompletionError, File, LimboError,
+    MonotonicInstant, OpenFlags, WallClockInstant, IO,
 };
+
+/// How an injected fsync failure reaches the caller.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SyncFailure {
+    /// The sync call itself returns an error, like the syscall backend
+    /// where a failed fsync(2) surfaces before a completion exists.
+    Submission,
+    /// The sync call succeeds and the completion later finishes with an
+    /// error, like io_uring where the failure arrives in the CQE.
+    Completion,
+}
 
 /// A single not-yet-durable file mutation.
 enum UnsyncedOp {
@@ -92,6 +110,9 @@ struct UnreliableIoState {
     /// simulated power-loss point.
     armed_path: Mutex<Option<String>>,
     snapshot: Mutex<Option<CrashSnapshot>>,
+    /// Per-path one-shot injected fsync failure, consumed by the next sync
+    /// of that file.
+    failing_syncs: Mutex<HashMap<String, SyncFailure>>,
 }
 
 impl UnreliableIoState {
@@ -149,6 +170,7 @@ impl UnreliableIo {
                 files: Mutex::new(HashMap::new()),
                 armed_path: Mutex::new(None),
                 snapshot: Mutex::new(None),
+                failing_syncs: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -181,6 +203,19 @@ impl UnreliableIo {
             .iter()
             .map(|(path, shadow)| (path.clone(), shadow.lock().unwrap().durable.clone()))
             .collect()
+    }
+
+    /// Make the next fsync of `path` fail, delivered as `failure`. The
+    /// file's pending unsynced writes are dropped from the durability
+    /// ledger at that point: as on Linux, a failed fsync leaves them
+    /// clean-but-unwritten, so no later fsync will pick them up. Only a
+    /// rewrite followed by a successful fsync makes the data durable.
+    pub fn fail_next_sync(&self, path: &str, failure: SyncFailure) {
+        self.state
+            .failing_syncs
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), failure);
     }
 
     /// True when `path` has writes not yet covered by a successful fsync.
@@ -315,6 +350,21 @@ impl File for UnreliableFile {
     }
 
     fn sync(&self, c: Completion, sync_type: FileSyncType) -> turso_core::Result<Completion> {
+        // Injected fsync failure: the pending writes are gone for good (the
+        // kernel marked them clean without writing them), and the error
+        // reaches the caller the way the armed delivery mode says.
+        let injected = self.state.failing_syncs.lock().unwrap().remove(&self.path);
+        if let Some(failure) = injected {
+            self.shadow.lock().unwrap().unsynced.clear();
+            let err = CompletionError::IOError(std::io::ErrorKind::Other, "injected fsync failure");
+            match failure {
+                SyncFailure::Submission => return Err(LimboError::CompletionError(err)),
+                SyncFailure::Completion => {
+                    c.error(err);
+                    return Ok(c);
+                }
+            }
+        }
         // Simulated power loss: crash while the armed file's fsync is in
         // flight, i.e. after its writes were submitted but before any of them
         // were made durable.
