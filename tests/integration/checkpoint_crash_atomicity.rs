@@ -227,6 +227,74 @@ fn full_commit_right_after_truncate_checkpoint_survives_power_loss() -> anyhow::
     Ok(())
 }
 
+#[test]
+fn full_commit_after_savepoint_spills_survives_power_loss() -> anyhow::Result<()> {
+    let db_path_sim = "full-commit-after-savepoint-spills.db";
+    const N_ROWS: usize = 82;
+    let old = "o".repeat(4096);
+    let new = "n".repeat(4096);
+    let io = Arc::new(UnreliableIo::new());
+    let db = Database::open_file_with_flags(
+        io.clone(),
+        db_path_sim,
+        OpenFlags::default(),
+        DatabaseOpts::new(),
+        None,
+        Arc::new(SqliteDialect),
+    )?;
+    let conn = db.connect()?;
+    conn.execute("PRAGMA synchronous=FULL")?;
+    conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")?;
+    conn.execute("CREATE INDEX t_anchor_idx ON t(id, v)")?;
+    conn.execute("BEGIN IMMEDIATE")?;
+    for id in 1..=N_ROWS {
+        conn.execute(format!(
+            "INSERT INTO t VALUES ({id}, CAST('{old}' AS BLOB))"
+        ))?;
+    }
+    conn.execute("COMMIT")?;
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    io.mark_all_durable();
+
+    conn.execute("PRAGMA cache_size=8")?;
+    conn.execute("BEGIN IMMEDIATE")?;
+    conn.execute("SAVEPOINT rollback_spill")?;
+    conn.execute("UPDATE t SET v = v || zeroblob(1024)")?;
+    conn.execute("ROLLBACK TO rollback_spill")?;
+    conn.execute("RELEASE rollback_spill")?;
+    conn.execute(format!("UPDATE t SET v = CAST('{new}' AS BLOB)"))?;
+    conn.execute("COMMIT")?;
+
+    let (_dir, recovered) = crash_now_and_recover(&io, db_path_sim)?;
+    assert_eq!(
+        query_rows(&recovered, "PRAGMA integrity_check")?,
+        vec!["ok".to_string()],
+        "the acknowledged commit recovered a corrupt database"
+    );
+    let table_count = query_rows(
+        &recovered,
+        &format!("SELECT COUNT(*) FROM t NOT INDEXED WHERE v = CAST('{new}' AS BLOB)"),
+    )?;
+    assert_eq!(
+        table_count,
+        vec![N_ROWS.to_string()],
+        "the table scan lost an acknowledged FULL commit after power loss"
+    );
+    let index_count = query_rows(
+        &recovered,
+        &format!(
+            "SELECT COUNT(*) FROM t INDEXED BY t_anchor_idx \
+             WHERE v = CAST('{new}' AS BLOB)"
+        ),
+    )?;
+    assert_eq!(
+        index_count,
+        vec![N_ROWS.to_string()],
+        "the forced-index scan lost an acknowledged FULL commit after power loss"
+    );
+    Ok(())
+}
+
 /// The same gate for the very first commit of a brand-new database: nothing
 /// has raised the WAL dirty flag yet, so before the fix the commit returned
 /// with all of its frames still unsynced.
