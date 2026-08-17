@@ -1,0 +1,512 @@
+<title>Turso Bug Review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --code:#f0f3f8;
+    --ink:#16202e; --muted:#59657a; --faint:#8592a4;
+    --border:#dde3ec; --border-strong:#c9d2df;
+    --accent:#0d7d8a; --accent-ink:#0a5a64;
+    --crit:#c62230; --crit-bg:#fce8ea; --crit-line:#d63a45;
+    --high:#a85400; --high-bg:#fbeeda; --high-line:#e07a1a;
+    --med:#7a5a00;  --med-bg:#f9f0d4;  --med-line:#d1a41f;
+    --low:#4f5d74;  --low-bg:#eceff5;  --low-line:#94a1b5;
+    --good:#12764a; --good-bg:#e2f3e9;
+    --bad:#c62230;  --bad-bg:#fce8ea;
+    --shadow:0 1px 2px rgba(16,32,46,.04),0 4px 16px rgba(16,32,46,.06);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  :root:not([data-theme="light"]){
+    @media (prefers-color-scheme:dark){
+      --bg:#0b0f16; --surface:#131a25; --surface-2:#0f1620; --code:#0e141d;
+      --ink:#e7eef7; --muted:#95a3b7; --faint:#6f7e93;
+      --border:#222e3e; --border-strong:#2e3d51;
+      --accent:#33d6c4; --accent-ink:#7ff0e3;
+      --crit:#ff7078; --crit-bg:#2b1417; --crit-line:#e5484d;
+      --high:#ffab5e; --high-bg:#2a1b0c; --high-line:#e0801f;
+      --med:#ffd166; --med-bg:#241e0b; --med-line:#d1a41f;
+      --low:#9aa8bd; --low-bg:#182130; --low-line:#3a4a60;
+      --good:#57cf90; --good-bg:#0f2419;
+      --bad:#ff7078; --bad-bg:#2b1417;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b0f16; --surface:#131a25; --surface-2:#0f1620; --code:#0e141d;
+    --ink:#e7eef7; --muted:#95a3b7; --faint:#6f7e93;
+    --border:#222e3e; --border-strong:#2e3d51;
+    --accent:#33d6c4; --accent-ink:#7ff0e3;
+    --crit:#ff7078; --crit-bg:#2b1417; --crit-line:#e5484d;
+    --high:#ffab5e; --high-bg:#2a1b0c; --high-line:#e0801f;
+    --med:#ffd166; --med-bg:#241e0b; --med-line:#d1a41f;
+    --low:#9aa8bd; --low-bg:#182130; --low-line:#3a4a60;
+    --good:#57cf90; --good-bg:#0f2419;
+    --bad:#ff7078; --bad-bg:#2b1417;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased;font-size:16px;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+  a{color:var(--accent-ink);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono);font-variant-ligatures:none}
+
+  /* ---- header ---- */
+  header{border-bottom:1px solid var(--border);background:
+     linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,var(--bg)),var(--bg));}
+  .top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;padding:34px 0 8px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent-ink);font-weight:600;margin:0 0 10px}
+  h1{font-size:clamp(28px,4.4vw,42px);line-height:1.05;margin:0;letter-spacing:-.02em;text-wrap:balance;font-weight:800}
+  .sub{color:var(--muted);margin:12px 0 0;max-width:62ch;font-size:15px}
+  .scope{display:flex;flex-wrap:wrap;gap:6px 18px;margin:18px 0 6px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .scope b{color:var(--ink);font-weight:600}
+  .toggle{flex:none;font-family:var(--mono);font-size:12px;border:1px solid var(--border-strong);
+    background:var(--surface);color:var(--muted);border-radius:8px;padding:7px 11px;cursor:pointer}
+  .toggle:hover{color:var(--ink);border-color:var(--accent)}
+
+  /* ---- summary tiles ---- */
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:26px 0 14px}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 16px 14px;
+    box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px}
+  .tile.crit::before{background:var(--crit-line)} .tile.high::before{background:var(--high-line)}
+  .tile.med::before{background:var(--med-line)} .tile.low::before{background:var(--low-line)}
+  .tile .n{font-size:34px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .tile.crit .n{color:var(--crit)} .tile.high .n{color:var(--high)}
+  .tile.med .n{color:var(--med)} .tile.low .n{color:var(--low)}
+  .tile .lbl{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-top:8px}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 30px}
+  .stat{flex:1 1 150px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow)}
+  .stat .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+  .stat .lbl{font-size:13px;color:var(--muted);margin-top:2px}
+  .stat .n.acc{color:var(--accent-ink)}
+
+  /* ---- callout ---- */
+  .callout{background:var(--surface);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:10px;padding:16px 18px;margin:0 0 28px;box-shadow:var(--shadow)}
+  .callout h3{margin:0 0 10px;font-size:14px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--accent-ink)}
+  .callout ol{margin:0;padding-left:20px}
+  .callout li{margin:6px 0;font-size:14.5px}
+  .callout a{font-weight:600}
+
+  /* ---- section headings ---- */
+  section{padding:22px 0 4px}
+  .sec-h{display:flex;align-items:baseline;gap:12px;margin:8px 0 16px;border-bottom:1px solid var(--border);padding-bottom:8px}
+  .sec-h h2{font-size:20px;margin:0;letter-spacing:-.01em;font-weight:750}
+  .sec-h .count{font-family:var(--mono);font-size:13px;color:var(--muted)}
+
+  /* ---- filter bar ---- */
+  .filters{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:8px;padding:12px 0;
+    background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);margin-bottom:6px}
+  .chip{font-family:var(--mono);font-size:12.5px;border:1px solid var(--border-strong);background:var(--surface);
+    color:var(--muted);border-radius:999px;padding:6px 13px;cursor:pointer;transition:.15s}
+  .chip:hover{color:var(--ink)}
+  .chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .chip .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .chip.f-crit .dot{background:var(--crit-line)} .chip.f-high .dot{background:var(--high-line)}
+  .chip.f-med .dot{background:var(--med-line)} .chip.f-low .dot{background:var(--low-line)}
+
+  /* ---- finding card ---- */
+  .card{background:var(--surface);border:1px solid var(--border);border-left-width:4px;border-radius:12px;
+    padding:18px 20px;margin:0 0 14px;box-shadow:var(--shadow)}
+  .card.crit{border-left-color:var(--crit-line)} .card.high{border-left-color:var(--high-line)}
+  .card.med{border-left-color:var(--med-line)} .card.low{border-left-color:var(--low-line)}
+  .card.hidden{display:none}
+  .chead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+  .id{font-family:var(--mono);font-size:12px;font-weight:700;padding:3px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink);border:1px solid var(--border)}
+  .sev{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;padding:3px 8px;border-radius:6px}
+  .sev.crit{color:var(--crit);background:var(--crit-bg)} .sev.high{color:var(--high);background:var(--high-bg)}
+  .sev.med{color:var(--med);background:var(--med-bg)} .sev.low{color:var(--low);background:var(--low-bg)}
+  .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;border-radius:6px;
+    color:var(--accent-ink);background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+  .ct{font-size:16.5px;font-weight:700;margin:6px 0 6px;letter-spacing:-.01em}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--faint);margin:0 0 10px;display:flex;flex-wrap:wrap;gap:4px 14px}
+  .meta b{color:var(--muted);font-weight:600}
+  .desc{font-size:14.5px;color:var(--ink);margin:0 0 12px}
+  .desc .loc{font-family:var(--mono);font-size:13px;color:var(--accent-ink);background:var(--surface-2);padding:.5px 5px;border-radius:4px}
+
+  /* ---- repro terminal ---- */
+  .repro{background:var(--code);border:1px solid var(--border);border-radius:9px;overflow:hidden;margin-top:2px}
+  .repro .bar{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);
+    padding:7px 12px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--ink) 4%,transparent)}
+  .repro pre{margin:0;padding:12px 14px;overflow-x:auto;font-family:var(--mono);font-size:12.7px;line-height:1.7}
+  .repro .q{color:var(--muted)}
+  .repro .bad{color:var(--bad);font-weight:600}
+  .repro .good{color:var(--good);font-weight:600}
+  .repro .cmt{color:var(--faint)}
+
+  /* ---- compact / low list ---- */
+  .lowlist{background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+  .lowrow{display:grid;grid-template-columns:64px 1fr;gap:14px;padding:12px 18px;border-top:1px solid var(--border);align-items:baseline}
+  .lowrow:first-child{border-top:none}
+  .lowrow .id{justify-self:start}
+  .lowrow .lt{font-size:14px}
+  .lowrow .lt .loc{font-family:var(--mono);font-size:12px;color:var(--accent-ink)}
+  .lowrow .lt .newpill{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--accent-ink);
+    border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);border-radius:5px;padding:1px 5px;margin-left:6px;text-transform:uppercase}
+
+  /* ---- table ---- */
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow)}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}
+  th,td{text-align:left;padding:10px 14px;border-top:1px solid var(--border);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-top:none;background:var(--surface-2)}
+  td.id-c{font-family:var(--mono);font-weight:700;color:var(--muted);white-space:nowrap}
+  td.fix{font-family:var(--mono);color:var(--good)}
+  tbody tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
+
+  .prose{font-size:14.5px;color:var(--ink)}
+  .prose ul{padding-left:20px;margin:8px 0}
+  .prose li{margin:7px 0}
+  .prose .k{font-weight:700}
+  .refute{background:var(--surface);border:1px solid var(--border);border-left:4px solid var(--low-line);border-radius:10px;padding:16px 18px;box-shadow:var(--shadow)}
+
+  footer{border-top:1px solid var(--border);margin-top:40px;padding:24px 0 48px;color:var(--muted);font-size:13px}
+  footer .mono{font-size:12px;color:var(--faint)}
+  .hr-note{font-size:12.5px;color:var(--faint);margin:10px 0 0;font-style:italic}
+  @media (max-width:720px){
+    .tiles{grid-template-columns:repeat(2,1fr)}
+    .top{flex-direction:column}
+  }
+</style>
+
+<header>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <p class="eyebrow">Adversarial commit review · 2026-02 → 2026-08</p>
+        <h1>Turso Bug Review</h1>
+        <p class="sub">Six months of merged <span class="mono">tursodatabase/turso</span> PRs, audited for introduced correctness and durability regressions. Every finding was adversarially re-verified and, where SQL-expressible, reproduced live against SQLite 3.45.1.</p>
+      </div>
+      <button class="toggle" id="themeBtn" aria-label="Toggle color theme">◐ theme</button>
+    </div>
+    <div class="scope">
+      <span><b>Verified HEAD</b> bad083fa</span>
+      <span><b>Window</b> 1428 PR-merge commits</span>
+      <span><b>Oracle</b> SQLite 3.45.1</span>
+      <span><b>Excluded</b> postgres · IVM · MVCC · encryption</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="tiles" aria-label="Confirmed bugs by severity">
+    <div class="tile crit"><div class="n">5</div><div class="lbl">Critical</div></div>
+    <div class="tile high"><div class="n">6</div><div class="lbl">High</div></div>
+    <div class="tile med"><div class="n">10</div><div class="lbl">Medium</div></div>
+    <div class="tile low"><div class="n">14</div><div class="lbl">Low</div></div>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="n acc">35</div><div class="lbl">confirmed live at HEAD</div></div>
+    <div class="stat"><div class="n">11</div><div class="lbl">newly discovered this pass</div></div>
+    <div class="stat"><div class="n">10</div><div class="lbl">real regressions, fixed upstream</div></div>
+    <div class="stat"><div class="n">1</div><div class="lbl">refuted on verification</div></div>
+  </div>
+
+  <div class="callout">
+    <h3>Start here — the six that matter most</h3>
+    <ol>
+      <li><a href="#C1">OFFSET over a nested-loop join silently drops rows</a> <b>(new)</b> — pagination over joins is broken.</li>
+      <li><a href="#C2">Comparison collation ignores the left operand's column</a> <b>(new)</b> — <span class="mono">bincol = nocasecol</span> uses NOCASE everywhere.</li>
+      <li><a href="#C3"><span class="mono">jsonb_set</span> corrupts nested-array documents</a> — an ordinary UPDATE can persist unreadable JSONB.</li>
+      <li><a href="#C4">ALTER TABLE drops DESC/COLLATE from UNIQUE</a> — autoindex corruption after reopen.</li>
+      <li><a href="#C5">Partial index drops rows from a LEFT JOIN's preserved side</a>.</li>
+      <li><a href="#H1">GROUP BY sorter elided on a hash-join build side</a> <b>(new)</b> — split groups, wrong counts.</li>
+    </ol>
+  </div>
+
+  <div class="filters" role="group" aria-label="Filter findings by severity">
+    <button class="chip" data-f="all" aria-pressed="true">All 35</button>
+    <button class="chip f-crit" data-f="crit" aria-pressed="false"><span class="dot"></span>Critical</button>
+    <button class="chip f-high" data-f="high" aria-pressed="false"><span class="dot"></span>High</button>
+    <button class="chip f-med" data-f="med" aria-pressed="false"><span class="dot"></span>Medium</button>
+    <button class="chip f-low" data-f="low" aria-pressed="false"><span class="dot"></span>Low</button>
+  </div>
+
+  <main id="findings">
+
+  <!-- ===================== CRITICAL ===================== -->
+  <section>
+    <div class="sec-h"><h2>Critical</h2><span class="count">wrong results / corruption / crash in normal use</span></div>
+
+    <article class="card crit" data-sev="crit" id="C1">
+      <div class="chead"><span class="id">C1</span><span class="sev crit">Critical</span><span class="tag">New</span></div>
+      <div class="ct">OFFSET over a nested-loop join skips <span class="mono">offset × (product of inner sizes)</span> rows</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/main_loop/body.rs:419</span><span><b>class</b> sql-semantics</span></div>
+      <p class="desc">The OFFSET jump target uses <span class="loc">join_order.first()</span> (the outermost loop) where it must use the innermost, so a positive OFFSET consumes whole outer-loop iterations. Masked by ORDER BY, hash joins, and single-table queries — which is why it went unnoticed. Breaks the common "paginate over a join" pattern.</p>
+      <div class="repro"><div class="bar">a=(1,2) · b=(10,20)</div><pre><span class="q">SELECT x,y FROM a,b LIMIT 3 OFFSET 2;</span>
+  turso   <span class="bad">(0 rows)</span>            <span class="cmt"># silently drops everything</span>
+  sqlite  <span class="good">(2,10), (2,20)</span></pre></div>
+    </article>
+
+    <article class="card crit" data-sev="crit" id="C2">
+      <div class="chead"><span class="id">C2</span><span class="sev crit">Critical</span><span class="tag">New</span></div>
+      <div class="ct">Comparison collation ignores the left operand's column collation</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/schema.rs:5379 · translate/expr/binary.rs:449</span><span><b>class</b> sql-semantics</span></div>
+      <p class="desc"><span class="loc">Column::collation_opt()</span> returns <span class="mono">None</span> for a default-BINARY column, so a column with implicit BINARY collation reports "no collation" and resolution falls through to the other operand's explicit collation — violating SQLite's "left operand column wins" rule (quoted verbatim in turso's own doc comment). Affects <b>WHERE, ON, and every join type</b>, not just hash joins. Case-insensitive columns compared to plain columns silently match wrong rows.</p>
+      <div class="repro"><div class="bar">tb.b TEXT (binary) · tn.n TEXT COLLATE NOCASE · tb=('abc','ABC') · tn=('abc')</div><pre><span class="q">SELECT tb.b FROM tb, tn WHERE tb.b = tn.n;</span>
+  turso   <span class="bad">abc, ABC</span>   <span class="cmt"># used NOCASE</span>
+  sqlite  <span class="good">abc</span>        <span class="cmt"># left operand is BINARY</span>
+<span class="cmt"># LEFT JOIN drops the null-padded row; control (tn.n = tb.b) agrees on both</span></pre></div>
+    </article>
+
+    <article class="card crit" data-sev="crit" id="C3">
+      <div class="chead"><span class="id">C3</span><span class="sev crit">Critical</span></div>
+      <div class="ct"><span class="mono">json_set</span>/<span class="mono">jsonb_set</span> double-adds size delta on consecutive-array paths</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> 1fa653b8 (2026-02-27)</span><span><b>root</b> core/json/jsonb.rs:2539</span></div>
+      <p class="desc">For a path with two or more adjacent array locators (<span class="mono">$[i][j][k]</span>), a shared header is rewritten twice, so the stored element size is wrong by <span class="mono">delta</span>. Manifests as a runtime error, a swallowed SQL NULL, <b>or</b> a silently corrupted blob that later reads back as malformed — durable data loss through an ordinary UPDATE.</p>
+      <div class="repro"><div class="bar">jsonb byte-level</div><pre><span class="q">SELECT hex(jsonb_set('[[[1]]]','$[0][0][0]','short'));</span>
+  turso   <span class="bad">8B BB 6B…</span>   <span class="cmt"># BB = size 11, real content 7</span>
+  sqlite  <span class="good">8B 7B 6B…</span>
+<span class="q">UPDATE t SET j=jsonb_set(j,'$.geometry.coordinates[0][0][0]',99.5);</span>
+  then <span class="q">SELECT json(j)</span> → <span class="bad">"malformed JSON"</span>  <span class="cmt"># document destroyed</span></pre></div>
+    </article>
+
+    <article class="card crit" data-sev="crit" id="C4">
+      <div class="chead"><span class="id">C4</span><span class="sev crit">Critical</span></div>
+      <div class="ct"><span class="mono">to_sql()</span> drops DESC/COLLATE from UNIQUE → autoindex corruption after ALTER + reopen</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> e4785093 (2026-02-26)</span><span><b>root</b> core/schema.rs:3778</span></div>
+      <p class="desc">Any <span class="mono">ALTER TABLE ADD/DROP/RENAME COLUMN</span> rewrites the stored SQL, turning <span class="mono">UNIQUE(a DESC,b)</span> into <span class="mono">UNIQUE(a,b)</span>. On reopen, the in-memory index claims ASC/BINARY while the on-disk b-tree was written DESC/NOCASE. Replaced a loud reopen crash with silent corruption — violating the project's own "crash &gt; corrupt" rule.</p>
+      <div class="repro"><div class="bar">after ALTER TABLE t ADD COLUMN c; reopen</div><pre><span class="q">INSERT INTO t(a,b) VALUES (1,'x');</span>   <span class="bad"># accepted — duplicate of existing row</span>
+<span class="q">SELECT * FROM t WHERE a=1 AND b='x';</span> <span class="bad"># returns 1 row, two exist</span>
+<span class="q">PRAGMA integrity_check;</span>              <span class="bad"># "row missing from index / non-unique entry"</span></pre></div>
+    </article>
+
+    <article class="card crit" data-sev="crit" id="C5">
+      <div class="chead"><span class="id">C5</span><span class="sev crit">Critical</span></div>
+      <div class="ct">Partial index on the preserved side of an OUTER JOIN silently drops rows</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> 9cbc321d (2026-04-30)</span><span><b>root</b> core/translate/optimizer/constraints.rs:1470</span></div>
+      <p class="desc"><span class="loc">can_use_query_term</span> early-returns <span class="mono">true</span> when the table has no <span class="mono">join_info</span> — exactly the case for the preserved left table. A partial index whose predicate matches an ON term then drives the scan, skipping the left rows a LEFT JOIN must still emit null-padded.</p>
+      <div class="repro"><div class="bar">CREATE INDEX partial_t ON t(a) WHERE b&gt;0</div><pre><span class="q">SELECT t.a,t.b FROM t LEFT JOIN s ON t.b&gt;0 ORDER BY t.a;</span>
+  turso   <span class="bad">(2,3), (4,10)</span>                  <span class="cmt"># b&lt;=0 rows dropped</span>
+  sqlite  <span class="good">(1,-5), (2,3), (3,-1), (4,10)</span>  <span class="cmt"># t is preserved</span></pre></div>
+    </article>
+  </section>
+
+  <!-- ===================== HIGH ===================== -->
+  <section>
+    <div class="sec-h"><h2>High</h2><span class="count">wrong results / crash in a plausible edge case · durability</span></div>
+
+    <article class="card high" data-sev="high" id="H1">
+      <div class="chead"><span class="id">H1</span><span class="sev high">High</span><span class="tag">New</span></div>
+      <div class="ct">GROUP BY / ORDER BY sorter wrongly elided on a hash-join build side</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/optimizer/order.rs (plan_satisfies_order_target)</span></div>
+      <p class="desc">The sorter is dropped when GROUP BY/ORDER BY can be served from a build-side index scan — but the hash-join output is ordered by the <em>probe</em> side, so streaming aggregation splits a group into partial counts. Guarded for LEFT/FULL outer joins, not for inner ones. <span class="mono">HAVING count(*)&gt;1</span> then silently returns nothing.</p>
+      <div class="repro"><div class="bar">t1 JOIN t2 ON t2.a=t1.a</div><pre><span class="q">SELECT t1.b,count(*) FROM t1 JOIN t2 ON t2.a=t1.a WHERE t1.c&gt;=0 GROUP BY t1.b;</span>
+  turso   <span class="bad">0|1, 1|1, 0|1, 1|1</span>   <span class="cmt"># groups split</span>
+  sqlite  <span class="good">0|2, 1|2</span></pre></div>
+    </article>
+
+    <article class="card high" data-sev="high" id="H2">
+      <div class="chead"><span class="id">H2</span><span class="sev high">High</span><span class="tag">New</span></div>
+      <div class="ct">Outer <span class="mono">OR IGNORE</span> leaks through a DELETE-trigger boundary and swallows a conflict</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/trigger_exec.rs:678 (ignore_jump_target)</span></div>
+      <p class="desc">The <span class="mono">a48e3f01</span> fix reset only the compile-time conflict override. An outer <span class="mono">OR IGNORE</span> still propagates at runtime, so a conflict inside a fired DELETE trigger's body jumps to the outer ignore target instead of aborting — even an explicit inner <span class="mono">INSERT OR ABORT</span> is overridden.</p>
+      <div class="repro"><div class="bar">AFTER UPDATE trigger deletes from t2; BEFORE DELETE on t2 inserts a PK-conflicting row</div><pre><span class="q">UPDATE OR IGNORE t SET x=9;</span>
+  turso   <span class="bad">no error, t=(1,9) applied</span>   <span class="cmt"># conflict swallowed</span>
+  sqlite  <span class="good">aborts: UNIQUE constraint failed: t2.pk</span></pre></div>
+    </article>
+
+    <article class="card high" data-sev="high" id="H3">
+      <div class="chead"><span class="id">H3</span><span class="sev high">High</span></div>
+      <div class="ct"><span class="mono">repeat()</span>/<span class="mono">lpad()</span>/<span class="mono">rpad()</span> allocate an attacker-controlled length with no cap</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> c681ded5 (2026-06-17)</span><span><b>root</b> core/functions/string.rs:31</span></div>
+      <p class="desc">Uses the infallible allocator with no <span class="mono">MAX_BLOB_LENGTH</span>/<span class="mono">TooBig</span> guard (unlike <span class="mono">zeroblob</span>/<span class="mono">randomblob</span>). With <span class="mono">panic="abort"</span> (release/fuzzing profiles) it hard-aborts the embedding process — a one-statement DoS.</p>
+      <div class="repro"><div class="bar">count taken straight from SQL (up to i64::MAX)</div><pre><span class="q">SELECT repeat('ab', 9223372036854775807);</span>  <span class="bad"># panic "capacity overflow" (exit 101)</span>
+<span class="q">SELECT lpad('x', 9223372036854775807);</span>     <span class="bad"># handle_alloc_error → SIGABRT (exit 134)</span></pre></div>
+    </article>
+
+    <article class="card high" data-sev="high" id="H4">
+      <div class="chead"><span class="id">H4</span><span class="sev high">High</span></div>
+      <div class="ct">JSONB <span class="mono">$[#]</span> / append-by-index leaves the container header one byte short</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> fc0e5241 (2026-06-24)</span><span><b>root</b> core/json/jsonb.rs:372</span></div>
+      <p class="desc">The immediate container header is updated with <span class="mono">delta</span> only; the spliced placeholder byte is forwarded to ancestors but not to the container itself. The result is a JSONB blob whose declared size disagrees with its length — turso cannot read back its own output.</p>
+      <div class="repro"><div class="bar">append to array</div><pre><span class="q">SELECT hex(jsonb_set('[1,2,3]','$[#]',4));</span>   turso <span class="bad">7B…</span> (size 7, actual 8) · sqlite <span class="good">8B…</span>
+<span class="q">SELECT json(jsonb_set('[1,2,3]','$[#]',4));</span>  turso <span class="bad">Parse error</span></pre></div>
+    </article>
+
+    <article class="card high" data-sev="high" id="H5">
+      <div class="chead"><span class="id">H5</span><span class="sev high">High</span></div>
+      <div class="ct">Use-after-free in the cursor registry: raw pointers parked across IO yields</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> f63bd46f (2026-06-04)</span><span><b>root</b> core/storage/btree.rs:6081</span></div>
+      <p class="desc"><span class="loc">drive_pending_peer_save</span> snapshots raw <span class="mono">NonNull&lt;dyn CursorTrait&gt;</span> pointers then yields on an overflow-page read. Nothing scrubs a peer's snapshot when that peer statement is reset/dropped (which frees the cursor box). On resume the writer dereferences freed memory — a sequential (non-concurrent) UAF reachable from normal binding/GC usage. Verifier could not refute.</p>
+    </article>
+
+    <article class="card high" data-sev="high" id="H6">
+      <div class="chead"><span class="id">H6</span><span class="sev high">High</span></div>
+      <div class="ct">Row-value <span class="mono">IN</span>/<span class="mono">NOT IN</span> ignores NULL in non-first tuple components</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> 98b46b15 (2026-02-24)</span><span><b>root</b> core/translate/expr/condition.rs:63</span></div>
+      <p class="desc">The NULL tracker is built from tuple component 0 only, so a NULL in a later component is invisible to three-valued logic and IN wrongly resolves to FALSE.</p>
+      <div class="repro"><div class="bar">3-valued logic on row values</div><pre><span class="q">SELECT (1,NULL) IN ((1,2));</span>      turso <span class="bad">0</span>   · sqlite <span class="good">NULL</span>
+<span class="q">SELECT (1,NULL) NOT IN ((1,2));</span>  turso <span class="bad">1</span>   · sqlite <span class="good">NULL</span></pre></div>
+    </article>
+  </section>
+
+  <!-- ===================== MEDIUM ===================== -->
+  <section>
+    <div class="sec-h"><h2>Medium</h2><span class="count">error-path misbehavior · panic on hostile input · resource leak</span></div>
+
+    <article class="card med" data-sev="med" id="M1">
+      <div class="chead"><span class="id">M1</span><span class="sev med">Medium</span></div>
+      <div class="ct">HAVING aliased-aggregate check rejects valid SQL when a real column shares the alias name</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/select.rs:1934</span></div>
+      <p class="desc">The check ignores that real table columns outrank result-column aliases in SQLite name resolution. <span class="mono">SELECT count(*) AS c, a FROM t GROUP BY a HAVING max(c)&gt;0</span> (with a real column <span class="mono">c</span>) → turso "misuse of aliased aggregate c"; sqlite returns rows.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M2">
+      <div class="chead"><span class="id">M2</span><span class="sev med">Medium</span></div>
+      <div class="ct"><span class="mono">PRAGMA ignore_check_constraints</span> never invalidates prepared statements</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/connection.rs (set_check_constraints_ignored)</span></div>
+      <p class="desc">The setter omits <span class="mono">bump_prepare_context_generation()</span>, so a cached statement keeps its compile-time CHECK decision after the pragma flips — a cached INSERT can silently bypass CHECK. Reachable via <span class="mono">prepare_cached</span>.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M3">
+      <div class="chead"><span class="id">M3</span><span class="sev med">Medium</span><span class="tag">New</span></div>
+      <div class="ct">Valid <span class="mono">FULL OUTER JOIN … ON a=b</span> rejected when the right table indexes the join column</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/…/join.rs:427,634</span></div>
+      <p class="desc"><span class="mono">rhs_has_selective_seek</span> disables the hash join; FULL OUTER has no nested-loop fallback, so no plan is found. Since indexing a join key is ubiquitous, common FULL OUTER JOINs fail with the misleading "requires an equality condition" — even though the ON clause <em>is</em> equality.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M4">
+      <div class="chead"><span class="id">M4</span><span class="sev med">Medium</span><span class="tag">New</span></div>
+      <div class="ct">Outer <span class="mono">OR ABORT</span> fails to override a trigger body's own conflict clause</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>root</b> core/translate/insert.rs:596 · emitter/update.rs:610</span></div>
+      <p class="desc">The override test uses the collapsed <span class="mono">on_conflict != Abort</span>, which cannot distinguish explicit <span class="mono">OR ABORT</span> (must override the body) from a plain statement (defers to the body). A trigger body's <span class="mono">OR IGNORE</span>/<span class="mono">OR REPLACE</span> wrongly stays in effect. The correct signal already exists but isn't used here.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M5">
+      <div class="chead"><span class="id">M5</span><span class="sev med">Medium</span><span class="tag">New</span></div>
+      <div class="ct"><span class="mono">sqlite3_value_blob</span> UAF fix is incomplete — now NULL-derefs on TEXT values</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> c425580a</span><span><b>root</b> bindings/c/src/lib.rs</span></div>
+      <p class="desc">The fix stopped the BLOB use-after-free but dropped Text→bytes coercion, so <span class="mono">value_blob(text)</span> returns NULL while <span class="mono">value_bytes(text)</span> returns the length. The standard <span class="mono">memcpy(dst, value_blob(v), value_bytes(v))</span> idiom NULL-derefs on a text argument. Traded a UAF for a NULL-deref.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M6">
+      <div class="chead"><span class="id">M6</span><span class="sev med">Medium</span><span class="tag">New</span></div>
+      <div class="ct">Parser <span class="mono">MAX_EXPR_DEPTH = 100</span> rejects valid expressions SQLite accepts (limit is 1000)</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> 18ba9c9c</span></div>
+      <p class="desc">A 100-term <span class="mono">OR</span> chain SQLite runs is rejected with "Expression tree is too large" (boundary 99 pass / 100 fail). Reject-over-crash is fine; the threshold is 10× too aggressive and bites machine-generated queries.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M7">
+      <div class="chead"><span class="id">M7</span><span class="sev med">Medium</span></div>
+      <div class="ct"><span class="mono">drain_completions</span> after <span class="mono">cancel()</span> is a no-op — io_uring error paths don't wait for in-flight I/O</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> b1bf20df (2026-05-11)</span><span><b>root</b> core/io/mod.rs:460</span></div>
+      <p class="desc"><span class="mono">cancel()</span> marks each completion <span class="mono">finished()</span>, so the drain loop never steps. On io_uring, a WAL/checkpoint write error can return while the kernel is still writing — risking WAL checksum-chain breakage. io_uring is opt-in (<span class="mono">--vfs io_uring</span>), so downgraded from high.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M8">
+      <div class="chead"><span class="id">M8</span><span class="sev med">Medium</span></div>
+      <div class="ct">Database registry stops de-duplicating on VFS backends whose paths aren't host files</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> 30d8eaf8 (2026-04-01)</span><span><b>root</b> core/database.rs (io.file_id gate)</span></div>
+      <p class="desc">The default <span class="mono">file_id</span> calls <span class="mono">std::fs::metadata</span>; a custom/object-store VFS whose paths don't exist on the host FS never registers → two independent <span class="mono">Database</span>/<span class="mono">WalFileShared</span> over the same storage → lost dedup, no OS locks → WAL corruption risk.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M9">
+      <div class="chead"><span class="id">M9</span><span class="sev med">Medium</span></div>
+      <div class="ct">Top-level JSON-null document returns SQL NULL through the <span class="mono">json_set</span> family</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> eed5c44f (2026-03-19)</span><span><b>root</b> core/json/mod.rs:619</span></div>
+      <p class="desc">A JSON-null element returns SQL NULL before the String/Binary output handling. <span class="mono">UPDATE t SET doc=json_set(doc,'$.flag',1)</span> silently replaces every row whose <span class="mono">doc</span> is the JSON document <span class="mono">null</span> with SQL NULL — while turso's own <span class="mono">json('null')</span> returns <span class="mono">null</span>.</p>
+    </article>
+    <article class="card med" data-sev="med" id="M10">
+      <div class="chead"><span class="id">M10</span><span class="sev med">Medium</span></div>
+      <div class="ct"><span class="mono">generate_series(1, NULL)</span> scans 4.29 billion rows instead of returning empty</div>
+      <div class="meta"><span><b>at-head</b> present</span><span><b>commit</b> d3c593a1 (2026-02-20)</span><span><b>root</b> core/series.rs:180</span></div>
+      <p class="desc">A planner-dropped literal NULL stop defaults to 4294967295, so the query hangs where SQLite returns 0 rows instantly. A runtime NULL (via subquery) correctly returns empty — the divergence is specific to the literal-NULL case.</p>
+    </article>
+  </section>
+
+  <!-- ===================== LOW ===================== -->
+  <section>
+    <div class="sec-h"><h2>Low</h2><span class="count">minor divergence from SQLite · perf cliff · hygiene</span></div>
+    <div class="lowlist" data-sev="low">
+      <div class="lowrow"><span class="id">L1</span><div class="lt"><b>prepare() on comment/whitespace-only SQL returns an error</b> — breaks the <span class="mono">sqlite3_prepare_v2</span> "SQLITE_OK + NULL stmt" contract; never NULLs <span class="mono">*ppStmt</span>. <span class="loc">bindings/c/src/lib.rs:969</span></div></div>
+      <div class="lowrow"><span class="id">L2</span><div class="lt"><b>External aggregate wrong arg count says "no such function"</b> instead of "wrong number of arguments" (<span class="mono">median(1,2)</span>). <span class="loc">core/function.rs:110</span></div></div>
+      <div class="lowrow"><span class="id">L3</span><div class="lt"><b>datetime numeric-string trim omits vertical tab</b> <span class="mono">\x0B</span>; <span class="mono">unixepoch('5'||char(11))</span> → turso NULL, sqlite a number. <span class="loc">core/functions/datetime.rs:222</span></div></div>
+      <div class="lowrow"><span class="id">L4</span><div class="lt"><b>Multiprocess-WAL last-process probe releases its lock before probing</b> — window to elect two "last" processes. Opt-in. <span class="loc">core/io/mod.rs:256</span></div></div>
+      <div class="lowrow"><span class="id">L5</span><div class="lt"><b>JSON REAL exponent not zero-padded</b>: <span class="mono">json_array(1e-7)</span> → <span class="mono">[1.0e-7]</span> vs sqlite <span class="mono">[1.0e-07]</span>. <span class="loc">core/json/mod.rs:245</span></div></div>
+      <div class="lowrow"><span class="id">L6</span><div class="lt"><b>Windows syscall backend leaks one kernel Event handle per thread</b> (<span class="mono">Cell&lt;HANDLE&gt;</span>, no <span class="mono">CloseHandle</span>); comment wrongly claims the OS reclaims it. <span class="loc">core/io/windows.rs:27</span></div></div>
+      <div class="lowrow"><span class="id">L7</span><div class="lt"><b>Synchronous waiters busy-spin at 100% CPU</b> while another thread is the io_uring leader (no park/backoff). <span class="loc">core/io/io_uring.rs:513</span></div></div>
+      <div class="lowrow"><span class="id">L8</span><div class="lt"><b><span class="mono">json_patch(target,'null')</span> skips target validation</b> — malformed target silently accepted. <span class="loc">core/json/ops.rs:28</span></div></div>
+      <div class="lowrow"><span class="id">L9</span><div class="lt"><b>Bracket-quoted path on an array node returns NULL</b> where SQLite raises "bad JSON path". <span class="loc">core/json/jsonb.rs:3064</span></div></div>
+      <div class="lowrow"><span class="id">L10</span><div class="lt"><b><span class="mono">regexp()</span> coerces REAL with Rust <span class="mono">f64::to_string</span></b> ("2" vs "2.0"); inconsistent with turso's own <span class="mono">CAST(x AS TEXT)</span>. <span class="loc">extensions/core/src/types.rs:327</span></div></div>
+      <div class="lowrow"><span class="id">L11</span><div class="lt"><b>Locale collation ids packed into 12 bits</b> but the registry allows up to <span class="mono">u16::MAX</span>; after 4092 distinct locale collations, ids silently truncate/wrap. <span class="loc">core/schema.rs:5339</span></div></div>
+      <div class="lowrow"><span class="id">L12</span><div class="lt"><b><span class="mono">PRAGMA recursive_triggers=ON</span> is silently ignored</b> <span class="newpill">new</span> — REPLACE-induced deletes never fire DELETE triggers; self-recursive triggers don't re-fire. Default OFF matches SQLite.</div></div>
+      <div class="lowrow"><span class="id">L13</span><div class="lt"><b><span class="mono">sqlite3_stmt_status</span> metrics double-count on statement reuse</b> <span class="newpill">new</span> — removed the per-<span class="mono">reset()</span> reset. Observability only. <span class="loc">commit 5b0ebe27</span></div></div>
+      <div class="lowrow"><span class="id">L14</span><div class="lt"><b>Read-path UTF-8 validation hard-errors "Corrupt"</b> <span class="newpill">new</span> on a SQLite-created DB holding invalid-UTF-8 TEXT (which SQLite tolerates). <span class="loc">commit ee89a221</span></div></div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ===================== FIXED ===================== -->
+  <section>
+    <div class="sec-h"><h2>Real regressions — already fixed at HEAD</h2><span class="count">10 · exposure only if the fork lags upstream</span></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Bug introduced in the window</th><th>Fixed by</th></tr></thead>
+        <tbody>
+          <tr><td class="id-c">A08-3</td><td><span class="mono">sqlite3_step</span> held the handle mutex across the step; progress-handler re-entrancy deadlock</td><td class="fix">9710f11a</td></tr>
+          <tr><td class="id-c">A10-2</td><td><span class="mono">gcd(i64::MIN,-1)</span> / <span class="mono">lcm</span> panic on <span class="mono">i64::MIN % -1</span></td><td class="fix">e08485d6</td></tr>
+          <tr><td class="id-c">A11-2</td><td><span class="mono">Opening</span> registry sentinel leaked on abandoned async open → path permanently unopenable</td><td class="fix">6efb903e</td></tr>
+          <tr><td class="id-c">A15-1</td><td><span class="mono">regexp('foo')</span> (1 arg) indexed <span class="mono">args[1]</span> → panic/abort across <span class="mono">extern "C"</span></td><td class="fix">530627ef</td></tr>
+          <tr><td class="id-c">A16-2</td><td>Case-preservation broke NATURAL JOIN / USING column matching (~3 months)</td><td class="fix">676b3d95</td></tr>
+          <tr><td class="id-c">A17-1</td><td>Named savepoints captured WAL rollback position without a lock → shared-WAL / reader corruption</td><td class="fix">46cd926d</td></tr>
+          <tr><td class="id-c">A17-2</td><td>Savepoint ops allowed mid-statement; ROLLBACK TO restored pages under a suspended writer</td><td class="fix">59d03e62</td></tr>
+          <tr><td class="id-c">A19-1</td><td><span class="mono">pending_reads</span> not cleared on rollback → rolled-back page images served later</td><td class="fix">4b025575</td></tr>
+          <tr><td class="id-c">A19-2</td><td><span class="mono">invalidate_btree_cache</span> leaked page pins → <span class="mono">CacheError(Pinned)</span> under spill</td><td class="fix">496c24ed</td></tr>
+          <tr><td class="id-c">A19-4</td><td>Debug <span class="mono">[WHOPPER_*]</span> <span class="mono">eprintln!</span> probes shipped in WAL hot paths (6 days)</td><td class="fix">ed5032f6</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================== REFUTED + CLEAN ===================== -->
+  <section>
+    <div class="sec-h"><h2>Refuted &amp; tested-clean</h2><span class="count">what did not survive verification, and where the engine held up</span></div>
+    <div class="refute prose">
+      <p style="margin:0 0 6px"><span class="k">Refuted (1) — A18-1</span> savepoint rollback aborts on a pinned page. The order-of-operations pattern is real, but the trigger is unreachable: the spill path subjournals the page before appending to the WAL, so any clean page newer than the rollback target is restored <em>dirty</em> (which clears its wal_tag) and is excluded from the failing delete. Empirically, mid-statement abort with heavy spilling and pinned cursors produced correct results matching SQLite.</p>
+    </div>
+    <div class="prose" style="margin-top:16px">
+      <p style="margin:0 0 4px"><span class="k">Tested clean (negative results worth recording):</span></p>
+      <ul>
+        <li><b>Multi-index OR / access-path union</b> — ~24,000 differential queries (branches, ranges, dedup, IS NULL seeks, partial indexes, NOCASE, DML incl. Halloween, 20k-row RowSet dedup). The <span class="mono">5025064b</span> unify-access-paths refactor is solid.</li>
+        <li><b>Aggregate <span class="mono">FILTER</span> clause</b> — ~20,000 fuzz + 130 hand cases with GROUP BY / DISTINCT / subqueries / HAVING — all match SQLite.</li>
+        <li><b>vdbe execution core</b> (A40–A43, ~80 commits) — REAL-affinity coercion, RENAME COLUMN expr-index rewrite, BEGIN CONCURRENT guard, REINDEX, Step-yield, <span class="mono">log/log2/log10</span> bit-for-bit, aggregate-arg collation, EXPLAIN panic fix.</li>
+        <li><b>Hash-join cross-product multiplicity</b> and <b>FULL OUTER null-extension</b> — ~7,000 fuzz queries, no divergence beyond C2 and M3.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Method.</b> Each of the paused session's 35 findings was re-checked by an independent adversarial verifier (default-refute; read code at HEAD + callers; check for later fixes; live repro against the SQLite 3.45.1 oracle). New findings came from differential fuzzing on the flagged behavior classes plus fresh review of never-started batches (vdbe, bindings-FFI). All critical/high findings were re-reproduced by hand.</p>
+    <p class="hr-note">Coverage still open for a follow-up: remaining killed translate batches (A21–A39), other bindings (A00–A07), sync durability (A45), cli/packaging/serverless-JS (B46–B49), and the 93 test-only commits (skim for masked regressions). Joins, collation, JSON, schema/DDL and conflict-resolution were the productive veins; vdbe / OR / FILTER tested low-yield.</p>
+    <p class="mono">All work was read-only. No source files were modified. · Verified HEAD bad083fa · Oracle SQLite 3.45.1</p>
+  </footer>
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement;
+    var btn=document.getElementById('themeBtn');
+    function cur(){var t=root.getAttribute('data-theme'); if(t) return t;
+      return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}
+    btn.addEventListener('click',function(){
+      var next=cur()==='dark'?'light':'dark';
+      root.setAttribute('data-theme',next);
+    });
+    // severity filter
+    var chips=[].slice.call(document.querySelectorAll('.chip'));
+    var cards=[].slice.call(document.querySelectorAll('.card'));
+    var lowlist=document.querySelector('.lowlist');
+    chips.forEach(function(c){
+      c.addEventListener('click',function(){
+        var f=c.getAttribute('data-f');
+        chips.forEach(function(x){x.setAttribute('aria-pressed', x===c?'true':'false');});
+        cards.forEach(function(card){
+          var show=(f==='all'||card.getAttribute('data-sev')===f);
+          card.classList.toggle('hidden',!show);
+        });
+        if(lowlist){lowlist.style.display=(f==='all'||f==='low')?'':'none';}
+      });
+    });
+  })();
+</script>
